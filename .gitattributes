@@ -1,0 +1,36 @@
+# 1. Global defaults: auto-detect text files and normalize line endings to LF
+* text=auto
+
+# 2. JavaScript / TypeScript source code (Enforce LF for Unix-like consistency)
+*.js text eol=lf
+*.jsx text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.mjs text eol=lf
+*.cjs text eol=lf
+
+# 3. Configuration and metadata files
+*.json text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.md text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+
+# 4. Shell and Windows scripts
+*.sh text eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 5. Node.js Package Lockfiles (Avoid merge conflicts by picking local changes or marking binary)
+package-lock.json merge=ours
+yarn.lock merge=ours
+pnpm-lock.yaml merge=ours
+
+# 6. Documentation and Assets (Mark graphics/media as binary)
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.svg text eol=lf
