@@ -324,6 +324,6 @@ build/**
 *.env
 .env
 
-# Node (project has no npm tooling; guards against stray installs)
+# Node
 node_modules/
-package-lock.json
+# package-lock.json is tracked on purpose: this repo is a deployed server, not a library

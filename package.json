@@ -1,0 +1,47 @@
+{
+  "name": "@mpujado/project-lens",
+  "version": "0.1.0",
+  "description": "Project-Lens — MCP server exposing a registry of local project groups with scoped read/search/write tools",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://gitea.home/AI/Project_Lens.git"
+  },
+  "files": [
+    "dist/src"
+  ],
+  "publishConfig": {
+    "registry": "https://gitea.home/api/packages/mpujado/npm/"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "project-lens": "dist/src/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "npm run build && node dist/src/index.js",
+    "prepublishOnly": "npm run build && npm test",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:watch": "vitest",
+    "bench": "npm run build && node dist/benchmark/e2e.js",
+    "bench:store": "npm run build && node dist/benchmark/store.bench.js",
+    "inspector": "npm run build && npx @modelcontextprotocol/inspector node dist/src/index.js $PROJECT_LENS_PATH"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.0.0",
+    "picomatch": "^4.0.5",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.0.0",
+    "@types/node": "^24.0.0",
+    "@types/picomatch": "^4.0.2",
+    "@vitest/coverage-v8": "^4.1.10",
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.10"
+  }
+}
