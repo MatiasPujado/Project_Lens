@@ -15,7 +15,15 @@ npm config set @mpujado:registry https://gitea.home/api/packages/mpujado/npm/
 npm config set -- '//gitea.home/api/packages/mpujado/npm/:_authToken' "<PAT with package permission>"
 ```
 
-The registry path segment is the **package owner** (`mpujado`), independent of the repo's `AI` org. The token is a Gitea personal access token with `package` permission — it lives in `~/.npmrc`, never in this repo.
+The registry path segment is the **package owner** (`mpujado`), independent of the repo's `AI` org. The token is a Gitea personal access token with `package` permission — it lives in `~/.npmrc` (mode `600`), never in this repo. Enter it interactively (`read -rs`) so it never lands in shell history.
+
+`gitea.home` is served by the Homelab internal CA. Node ships its own CA bundle and ignores the OS trust store, so every npm command touching the registry needs:
+
+```bash
+export NODE_OPTIONS=--use-system-ca
+```
+
+Without it npm fails with `UNABLE_TO_VERIFY_LEAF_SIGNATURE` even though the root CA is installed system-wide. Use `--use-system-ca` (Node ≥ 22.15), which *augments* Node's bundle — not `cafile`, which *replaces* it and breaks resolution against `registry.npmjs.org`, and never `strict-ssl=false`.
 
 For development, clone + build instead:
 
@@ -92,7 +100,7 @@ Registered from the Claude_Toolbox plugin (`toolbox-servers/.mcp.json`), same pa
 | `scaffold_project(group, name, {readme?, gitignore?})` | **User-initiated only.** Create `<group>/<name>` + `git init`. No network |
 | `refresh_registry` | Force full re-scan, returns scan stats |
 
-Secret-pattern files (`.env*`, `*.pem`, `id_rsa*`, `*credentials*`) never appear in `key_files`, listings, or search results.
+Secret-pattern files (`.env*`, `*.pem`, `id_rsa*`, `*credentials*`) never appear in `key_files`, listings, or search results. `project_info` strips userinfo (`user:token@`) from git remote URLs before returning them.
 
 ## Development
 
@@ -103,6 +111,19 @@ npm run bench:store  # registry micro-benchmark: cold scan, lookups, memory
 npm run inspector # manual acceptance via MCP Inspector
 ```
 
-Publishing: `npm publish` from the repo root. Bump `version` for every release — Gitea rejects re-uploading an existing name+version, the old one has to be deleted first.
+### Publishing
+
+`npm publish` from the repo root, with `NODE_OPTIONS=--use-system-ca` set. `prepublishOnly` runs `build` + `test`, so a failing suite aborts the release. Bump `version` for every release — Gitea rejects re-uploading an existing name+version, the old one has to be deleted first (`npm unpublish @mpujado/project-lens@<version>`).
+
+The JetBrains run configurations in `.idea/runConfigurations/` wrap this:
+
+| Runner | Does |
+|---|---|
+| `Registry Setup (Gitea)` | Writes the scope mapping + auth token to `~/.npmrc` (mode `600`); prompts for the PAT if `GITEA_NPM_TOKEN` is unset |
+| `Publish (Gitea)` | Preflight — verifies the `@mpujado` scope mapping and that an auth token for `gitea.home` exists, then confirms before `npm publish` |
+| `Published Versions` | Local version vs. what the registry has |
+| `Unpublish Current Version` | Deletes the current version from the registry (type-the-version confirmation) |
+
+All four export `NODE_OPTIONS=--use-system-ca`. The PAT is never stored in these XML files — they are git-tracked.
 
 Benchmark SLA (personal PC, 42 projects / 16 groups under `/media/Dev/Personal`): cold scan < 500 ms (measured ~90 ms), registry tools < 15–20 ms (measured < 1 ms), `project_info` < 100 ms (measured ~5 ms), `search` < 80 ms (measured ~7 ms).
