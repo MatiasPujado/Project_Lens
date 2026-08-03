@@ -1,8 +1,21 @@
 import { mkdir, rm } from 'node:fs/promises';
 import path from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { Registry } from '../src/registry.js';
 import { cleanup, makeWorkspace } from './helpers.js';
+
+const unstatable = vi.hoisted(() => new Set<string>());
+
+vi.mock('node:fs/promises', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    stat: (target: string, ...rest: unknown[]) =>
+      unstatable.has(target)
+        ? Promise.reject(new Error('ENOENT: no such file or directory'))
+        : (actual.stat as (...a: unknown[]) => unknown)(target, ...rest)
+  };
+});
 
 let root: string;
 let registry: Registry;
@@ -88,6 +101,23 @@ describe('Registry', () => {
     expect(fresh.getAll().map(n => n.name).sort()).toEqual(['A1', 'B1', 'B2']);
     await cleanup(rootA);
     await cleanup(rootB);
+  });
+
+  it('warns but keeps scanning when a group dir vanishes mid-scan', async () => {
+    const scratch = await makeWorkspace({ GroupA: { A1: { '.git': {} } } });
+    const vanished = path.join(scratch, 'GroupA');
+    const warn = vi.spyOn(console, 'error').mockImplementation(() => {});
+    unstatable.add(vanished);
+    try {
+      const fresh = new Registry({ roots: [scratch], exclude: [] });
+      const stats = await fresh.initialize();
+      expect(stats.projects).toBe(1);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(`"${vanished}" vanished`));
+    } finally {
+      unstatable.delete(vanished);
+      warn.mockRestore();
+      await cleanup(scratch);
+    }
   });
 
   it('find matches a substring in the middle of a name', () => {
