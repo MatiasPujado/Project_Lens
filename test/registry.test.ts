@@ -1,4 +1,4 @@
-import { mkdir } from 'node:fs/promises';
+import { mkdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Registry } from '../src/registry.js';
@@ -58,5 +58,39 @@ describe('Registry', () => {
     await mkdir(path.join(root, 'GroupB', 'NewProj', '.git'), { recursive: true });
     await fresh.revalidate();
     expect(fresh.getAll().some(n => n.name === 'NewProj')).toBe(true);
+  });
+
+  it('revalidate drops projects under a group dir that disappeared', async () => {
+    const scratch = await makeWorkspace({
+      Keep: { Kept: { '.git': {} } },
+      Doomed: { Gone: { '.git': {} } }
+    });
+    const fresh = new Registry({ roots: [scratch], exclude: [] });
+    await fresh.initialize();
+    expect(fresh.getAll()).toHaveLength(2);
+
+    await rm(path.join(scratch, 'Doomed'), { recursive: true, force: true });
+    await fresh.revalidate();
+
+    expect(fresh.getAll().map(n => n.name)).toEqual(['Kept']);
+    await cleanup(scratch);
+  });
+
+  it('rescans only the stale root when several are configured', async () => {
+    const rootA = await makeWorkspace({ GroupA: { A1: { '.git': {} } } });
+    const rootB = await makeWorkspace({ GroupB: { B1: { '.git': {} } } });
+    const fresh = new Registry({ roots: [rootA, rootB], exclude: [] });
+    expect((await fresh.initialize()).scanned_roots).toBe(2);
+
+    await mkdir(path.join(rootB, 'GroupB', 'B2', '.git'), { recursive: true });
+    await fresh.revalidate();
+
+    expect(fresh.getAll().map(n => n.name).sort()).toEqual(['A1', 'B1', 'B2']);
+    await cleanup(rootA);
+    await cleanup(rootB);
+  });
+
+  it('find matches a substring in the middle of a name', () => {
+    expect(registry.find('service').map(n => n.name)).toEqual(['Gamma_Service']);
   });
 });

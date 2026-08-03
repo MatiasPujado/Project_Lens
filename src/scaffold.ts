@@ -52,7 +52,7 @@ export async function scaffoldProject(
         break;
       }
     } catch {
-      // not under this root
+      console.error(`Group "${group}" does not exist under root ${root}`);
     }
   }
   if (!groupDir || !owningRoot) {

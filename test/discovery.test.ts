@@ -1,6 +1,8 @@
+import { chmod } from 'node:fs/promises';
+import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { scanRoot } from '../src/discovery.js';
-import { cleanup, makeWorkspace } from './helpers.js';
+import { cleanup, makeWorkspace, notRoot } from './helpers.js';
 
 let root: string;
 
@@ -58,6 +60,20 @@ describe('scanRoot', () => {
     expect(names).toContain('Homebanking');
   });
 
+  it('accepts exclude patterns that are not directory globs', async () => {
+    const { projects } = await scanRoot(root, ['Experiments']);
+    expect(projects.map(p => p.name)).not.toContain('FlatProj');
+    expect(projects.map(p => p.name)).toContain('Homebanking');
+  });
+
+  it('still revalidates a root that holds no project at all', async () => {
+    const barren = await makeWorkspace({ Empty: { 'note.txt': 'x' } });
+    const { projects, groupDirs } = await scanRoot(barren, []);
+    expect(projects).toEqual([]);
+    expect(groupDirs).toEqual([barren]);
+    await cleanup(barren);
+  });
+
   it('captures manifests, stack and readme in the boundary readdir', async () => {
     const { projects } = await scanRoot(root, []);
     const hb = projects.find(p => p.name === 'Homebanking')!;
@@ -82,5 +98,17 @@ describe('scanRoot', () => {
   it('skips dirs that lead to no project, keeping revalidation cheap', async () => {
     const { groupDirs } = await scanRoot(root, []);
     expect(groupDirs.some(d => d.endsWith('NotAProject'))).toBe(false);
+  });
+
+  it.skipIf(!notRoot)('skips unreadable dirs instead of aborting the scan', async () => {
+    const locked = await makeWorkspace({ Locked: { Hidden: { '.git': {} } }, Open: { Seen: { '.git': {} } } });
+    await chmod(path.join(locked, 'Locked'), 0o000);
+    try {
+      const { projects } = await scanRoot(locked, []);
+      expect(projects.map(p => p.name)).toEqual(['Seen']);
+    } finally {
+      await chmod(path.join(locked, 'Locked'), 0o755);
+      await cleanup(locked);
+    }
   });
 });

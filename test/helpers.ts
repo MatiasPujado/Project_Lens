@@ -25,3 +25,19 @@ export async function makeWorkspace(tree: Tree): Promise<string> {
 export async function cleanup(root: string): Promise<void> {
   await rm(root, { recursive: true, force: true });
 }
+
+export function textOf(result: unknown): string {
+  const r = result as { content: Array<{ type: string; text: string }> };
+  return r.content[0]!.text;
+}
+
+export function jsonOf<T>(result: unknown): T {
+  return JSON.parse(textOf(result)) as T;
+}
+
+export function isError(result: unknown): boolean {
+  return (result as { isError?: boolean }).isError === true;
+}
+
+/** Chmod-based permission tests are meaningless as root. */
+export const notRoot = process.getuid?.() !== 0;

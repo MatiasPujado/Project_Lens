@@ -28,17 +28,7 @@ function runRg(args: string[]): Promise<string> {
   });
 }
 
-export async function searchScope(
-  scopeDir: string,
-  projects: ProjectNode[],
-  query: string,
-  glob?: string
-): Promise<SearchHit[]> {
-  const args = ['--json', '--max-count', '20', '-e', query];
-  if (glob) args.push('-g', glob);
-  args.push('--', scopeDir);
-  const stdout = await runRg(args);
-
+export function parseRgOutput(stdout: string, projects: ProjectNode[]): SearchHit[] {
   const byPathDesc = [...projects].sort((a, b) => b.absolutePath.length - a.absolutePath.length);
   const hits: SearchHit[] = [];
   for (const line of stdout.split('\n')) {
@@ -65,4 +55,16 @@ export async function searchScope(
     });
   }
   return hits;
+}
+
+export async function searchScope(
+  scopeDir: string,
+  projects: ProjectNode[],
+  query: string,
+  glob?: string
+): Promise<SearchHit[]> {
+  const args = ['--json', '--max-count', '20', '-e', query];
+  if (glob) args.push('-g', glob);
+  args.push('--', scopeDir);
+  return parseRgOutput(await runRg(args), projects);
 }

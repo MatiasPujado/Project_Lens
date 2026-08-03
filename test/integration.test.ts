@@ -4,19 +4,10 @@ import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Registry } from '../src/registry.js';
 import { buildServer } from '../src/tools.js';
-import { cleanup, makeWorkspace } from './helpers.js';
+import { cleanup, isError, jsonOf, makeWorkspace, textOf } from './helpers.js';
 
 let root: string;
 let client: Client;
-
-function textOf(result: unknown): string {
-  const r = result as { content: Array<{ type: string; text: string }> };
-  return r.content[0]!.text;
-}
-
-function jsonOf<T>(result: unknown): T {
-  return JSON.parse(textOf(result)) as T;
-}
 
 beforeAll(async () => {
   root = await makeWorkspace({
@@ -109,7 +100,7 @@ describe('Project-Lens over MCP', () => {
     expect(payload.results[0]).toMatchObject({ project: 'Homebanking', file: 'src/Main.java' });
 
     const invalid = await client.callTool({ name: 'search', arguments: { query: 'x' } });
-    expect((invalid as { isError?: boolean }).isError).toBe(true);
+    expect(isError(invalid)).toBe(true);
   });
 
   it('read_file and write_file stay inside the project root', async () => {
@@ -131,7 +122,7 @@ describe('Project-Lens over MCP', () => {
       name: 'read_file',
       arguments: { project: 'Homebanking', relative_path: '../../../etc/passwd' }
     });
-    expect((escape as { isError?: boolean }).isError).toBe(true);
+    expect(isError(escape)).toBe(true);
   });
 
   it('scaffold_project and refresh_registry round-trip', async () => {

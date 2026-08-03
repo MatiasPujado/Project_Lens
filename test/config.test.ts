@@ -28,6 +28,11 @@ describe('loadConfig', () => {
     expect(loadConfig('/nonexistent/config.json')).toBeUndefined();
   });
 
+  it('fails loudly when the path is unreadable', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'lens-cfg-dir-'));
+    expect(() => loadConfig(dir)).toThrow(/not readable at/);
+  });
+
   it('fails loudly on invalid JSON', async () => {
     const file = await writeConfig('{nope');
     expect(() => loadConfig(file)).toThrow(/not valid JSON/);
