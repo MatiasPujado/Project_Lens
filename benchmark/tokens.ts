@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { rm } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { anyProject, callText, connect } from './client.js';
+import { anyProject, callText, column, connect, type ProjectTable } from './client.js';
 import { scenarios, type Fixtures, type Scenario } from './scenarios.js';
 import { countTokens, flushCache, COUNTER, MODEL, UNIT } from './tokenizer.js';
 
@@ -111,12 +111,13 @@ for (const r of rows) {
  * The spec's bulk-sweep criterion is projection vs N× `project_info` over the same registry —
  * a different comparison from the bash baselines above, and the one the recorded 6.1× came from.
  */
-const registry = (JSON.parse(await callText(client, 'list_projects', {})) as {
-  projects: typeof project[];
-}).projects;
+const registry = JSON.parse(await callText(client, 'list_projects', {})) as ProjectTable;
+const nameOf = column(registry, 'name');
+const groupOf = column(registry, 'group');
 let nInfo = 0;
-for (const p of registry) {
-  const name = p.group === '(root)' ? p.name : `${p.group}/${p.name}`;
+for (const row of registry.rows) {
+  const group = groupOf(row);
+  const name = group === '(root)' ? nameOf(row) : `${group}/${nameOf(row)}`;
   nInfo += await countTokens(JSON.stringify({ name: 'project_info', arguments: { name } }));
   nInfo += await countTokens(await callText(client, 'project_info', { name }));
 }
@@ -124,8 +125,8 @@ for (const p of registry) {
 const sweep = rows.find(r => r.id === 'list_projects (sweep)');
 if (sweep) {
   console.log(
-    `\nbulk sweep over ${registry.length} projects: ` +
-      `projection ${sweep.mcp} vs ${nInfo} for ${registry.length}× project_info ` +
+    `\nbulk sweep over ${registry.rows.length} projects: ` +
+      `projection ${sweep.mcp} vs ${nInfo} for ${registry.rows.length}× project_info ` +
       `— ${(nInfo / sweep.mcp).toFixed(1)}× smaller (spec target ≥10×)`
   );
 }

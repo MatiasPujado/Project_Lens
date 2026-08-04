@@ -105,56 +105,52 @@ describe('map_workspace', () => {
 });
 
 describe('list_projects', () => {
+  interface Table {
+    fields: string[];
+    rows: unknown[][];
+  }
+
+  /** Rebuilds an object per row so assertions read against field names, not indexes. */
+  function objects(table: Table): Array<Record<string, unknown>> {
+    return table.rows.map(row => Object.fromEntries(table.fields.map((f, i) => [f, row[i]])));
+  }
+
   it('returns every project sorted by group-qualified key when no group is given', async () => {
-    const payload = jsonOf<{ projects: Array<{ name: string; group: string }> }>(
-      await client.callTool({ name: 'list_projects', arguments: {} })
-    );
-    expect(payload.projects.map(p => `${p.group}/${p.name}`)).toEqual([
+    const table = jsonOf<Table>(await client.callTool({ name: 'list_projects', arguments: {} }));
+    expect(objects(table).map(p => `${p.group}/${p.name}`)).toEqual([
       'Group/ProjA',
       'Group/ProjB',
       'Group/SvnProj',
       '(root)/Solo'
     ]);
-    expect(payload.projects[0]).not.toHaveProperty('branch');
-    expect(payload.projects[0]).not.toHaveProperty('vcs_type');
+    expect(table.fields).toEqual(['name', 'group', 'absolute_path']);
   });
 
   it('include projects vcs and stack fields in one sweep', async () => {
-    const payload = jsonOf<{
-      projects: Array<{
-        name: string;
-        vcs_type: string;
-        branch: string | null;
-        is_clean: boolean | null;
-        stack: string[];
-      }>;
-    }>(
+    const table = jsonOf<Table>(
       await client.callTool({
         name: 'list_projects',
         arguments: { group: 'Group', include: ['branch', 'is_clean', 'stack'] }
       })
     );
-    expect(payload.projects.map(p => p.name)).toEqual(['ProjA', 'ProjB', 'SvnProj']);
-    for (const p of payload.projects) {
-      expect(p).toHaveProperty('branch');
-      expect(p).toHaveProperty('is_clean');
-    }
-    const svn = payload.projects.find(p => p.name === 'SvnProj')!;
+    expect(table.fields).toEqual(['name', 'group', 'vcs_type', 'branch', 'is_clean', 'stack']);
+    const projects = objects(table);
+    expect(projects.map(p => p.name)).toEqual(['ProjA', 'ProjB', 'SvnProj']);
+
+    const svn = projects.find(p => p.name === 'SvnProj')!;
     expect(svn.vcs_type).toBe('svn');
     expect(svn.branch).toBeNull();
     expect(svn.is_clean).toBeNull();
     expect(svn.stack).toEqual(['Java']);
-    expect(payload.projects.find(p => p.name === 'ProjA')!.vcs_type).toBe('git');
+    expect(projects.find(p => p.name === 'ProjA')!.vcs_type).toBe('git');
   });
 
   it('include of stack alone runs no vcs queries and omits vcs_type', async () => {
-    const payload = jsonOf<{ projects: Array<Record<string, unknown>> }>(
+    const table = jsonOf<Table>(
       await client.callTool({ name: 'list_projects', arguments: { group: 'Group', include: ['stack'] } })
     );
-    expect(payload.projects[0]).toHaveProperty('stack');
-    expect(payload.projects[0]).not.toHaveProperty('vcs_type');
-    expect(payload.projects[0]).not.toHaveProperty('branch');
-    expect(payload.projects[0]).not.toHaveProperty('absolute_path');
+    expect(table.fields).toEqual(['name', 'group', 'stack']);
+    expect(table.rows).toHaveLength(3);
   });
 });
 

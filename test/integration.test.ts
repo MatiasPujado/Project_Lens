@@ -71,10 +71,11 @@ describe('Project-Lens over MCP', () => {
     );
     expect(groups.groups).toEqual(['Experiments', 'Prisma/NEWPAY']);
 
-    const listed = jsonOf<{ projects: Array<{ name: string }> }>(
+    const listed = jsonOf<{ fields: string[]; rows: unknown[][] }>(
       await client.callTool({ name: 'list_projects', arguments: { group: 'Prisma' } })
     );
-    expect(listed.projects.map(p => p.name)).toEqual(['Homebanking']);
+    const nameAt = listed.fields.indexOf('name');
+    expect(listed.rows.map(r => r[nameAt])).toEqual(['Homebanking']);
 
     const found = jsonOf<{ matches: Array<{ name: string; group: string }> }>(
       await client.callTool({ name: 'find_project', arguments: { query: 'homebank' } })

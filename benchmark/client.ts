@@ -36,9 +36,24 @@ export interface BenchProject {
   absolute_path: string;
 }
 
+export interface ProjectTable {
+  fields: string[];
+  rows: unknown[][];
+}
+
+export function column(table: ProjectTable, field: string): (row: unknown[]) => string {
+  const i = table.fields.indexOf(field);
+  if (i < 0) throw new Error(`list_projects response has no "${field}" column`);
+  return row => row[i] as string;
+}
+
 export async function anyProject(client: Client): Promise<BenchProject> {
-  const text = await callText(client, 'list_projects', {});
-  const { projects } = JSON.parse(text) as { projects: BenchProject[] };
-  if (projects.length === 0) throw new Error('no projects in registry; check config');
-  return projects[0]!;
+  const table = JSON.parse(await callText(client, 'list_projects', {})) as ProjectTable;
+  const first = table.rows[0];
+  if (first === undefined) throw new Error('no projects in registry; check config');
+  return {
+    name: column(table, 'name')(first),
+    group: column(table, 'group')(first),
+    absolute_path: column(table, 'absolute_path')(first)
+  };
 }

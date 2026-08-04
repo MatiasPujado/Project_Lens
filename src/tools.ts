@@ -104,7 +104,8 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
     {
       description:
         'List projects, optionally filtered by group path. Use include for bulk metadata sweeps ' +
-        '(one call instead of N project_info calls); branch/is_clean are queried live.',
+        '(one call instead of N project_info calls); branch/is_clean are queried live. ' +
+        'Returns {fields, rows}: each row is positional against fields.',
       inputSchema: z.object({
         group: z.string().optional().describe("Group path filter, e.g. 'Prisma/NEWPAY'. Omit for all."),
         include: z.array(z.enum(['branch', 'is_clean', 'stack'])).optional()
@@ -121,16 +122,19 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
       const vcs = wantsVcs
         ? await Promise.all(nodes.map(n => vcsInfo(n.vcsType, n.absolutePath)))
         : [];
+      const columns: Array<[string, (n: ProjectNode, i: number) => unknown]> = [
+        ['name', n => n.name],
+        ['group', n => groupKey(n)]
+      ];
+      if (include === undefined) columns.push(['absolute_path', n => n.absolutePath]);
+      if (wantsVcs) columns.push(['vcs_type', n => n.vcsType]);
+      if (include?.includes('branch')) columns.push(['branch', (_n, i) => vcs[i]!.branch]);
+      if (include?.includes('is_clean')) columns.push(['is_clean', (_n, i) => vcs[i]!.is_clean]);
+      if (include?.includes('stack')) columns.push(['stack', n => n.detectedStack]);
+
       return json({
-        projects: nodes.map((n, i) => ({
-          name: n.name,
-          group: groupKey(n),
-          ...(include === undefined && { absolute_path: n.absolutePath }),
-          ...(wantsVcs && { vcs_type: n.vcsType }),
-          ...(include?.includes('branch') && { branch: vcs[i]!.branch }),
-          ...(include?.includes('is_clean') && { is_clean: vcs[i]!.is_clean }),
-          ...(include?.includes('stack') && { stack: n.detectedStack })
-        }))
+        fields: columns.map(([field]) => field),
+        rows: nodes.map((n, i) => columns.map(([, cell]) => cell(n, i)))
       });
     })
   );
