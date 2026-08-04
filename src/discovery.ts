@@ -30,7 +30,8 @@ export async function scanRoot(root: string, exclude: string[]): Promise<ScanOut
     }
     const names = new Set(entries.map(e => e.name));
 
-    if (names.has('.git')) {
+    const vcsType = names.has('.git') ? 'git' : names.has('.svn') ? 'svn' : null;
+    if (vcsType) {
       const name = path.basename(dir);
       const manifests = entries
         .filter(e => e.isFile() && MANIFEST_FILES.has(e.name) && !isSecretFile(e.name))
@@ -42,10 +43,10 @@ export async function scanRoot(root: string, exclude: string[]): Promise<ScanOut
         groupPath: groupSegments.slice(0, -1).join('/'),
         absolutePath: dir,
         root,
+        vcsType,
         detectedStack: detectStack(manifests),
         keyFiles: manifests,
-        readmePath: readme ? path.join(dir, readme.name) : undefined,
-        scannedAt: Date.now()
+        readmePath: readme ? path.join(dir, readme.name) : undefined
       });
       return true;
     }

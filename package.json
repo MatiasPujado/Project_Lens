@@ -1,6 +1,6 @@
 {
   "name": "@mpujado/project-lens",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Project-Lens — MCP server exposing a registry of local project groups with scoped read/search/write tools",
   "type": "module",
   "license": "MIT",
@@ -29,6 +29,8 @@
     "test:watch": "vitest",
     "bench": "npm run build && node dist/benchmark/e2e.js",
     "bench:store": "npm run build && node dist/benchmark/store.bench.js",
+    "bench:tokens": "npm run build && node dist/benchmark/tokens.js",
+    "bench:tokens:bytes": "npm run build && LENS_BENCH_COUNTER=bytes node dist/benchmark/tokens.js",
     "inspector": "npm run build && npx @modelcontextprotocol/inspector node dist/src/index.js $PROJECT_LENS_PATH"
   },
   "dependencies": {
@@ -37,6 +39,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@anthropic-ai/sdk": "^0.115.0",
     "@modelcontextprotocol/client": "2.0.0",
     "@types/node": "^24.0.0",
     "@types/picomatch": "^4.0.2",

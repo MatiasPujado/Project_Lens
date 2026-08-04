@@ -327,3 +327,6 @@ build/**
 # Node
 node_modules/
 # package-lock.json is tracked on purpose: this repo is a deployed server, not a library
+
+# Project-Lens token benchmark cache
+benchmark/.token-cache.json
