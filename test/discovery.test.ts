@@ -32,6 +32,9 @@ beforeAll(async () => {
     Utilities: {
       SomeTool: { '.git': {} }
     },
+    Legacy: {
+      Homebanking_svn: { '.svn': {}, 'pom.xml': '<project/>' }
+    },
     NotAProject: { 'readme.txt': 'x' }
   });
 });
@@ -45,6 +48,15 @@ describe('scanRoot', () => {
     expect(keys).toContain('Prisma/NEWPAY/Homebanking');
     expect(keys).toContain('Prisma/Tools/Pipeline_Updater');
     expect(keys).toContain('Experiments/FlatProj');
+  });
+
+  it('indexes svn working copies with their vcs type', async () => {
+    const { projects } = await scanRoot(root, []);
+    const svn = projects.find(p => p.name === 'Homebanking_svn')!;
+    expect(svn.vcsType).toBe('svn');
+    expect(svn.groupPath).toBe('Legacy');
+    expect(svn.detectedStack).toEqual(['Java']);
+    expect(projects.find(p => p.name === 'Homebanking')!.vcsType).toBe('git');
   });
 
   it('never descends into project internals', async () => {

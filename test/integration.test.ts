@@ -40,10 +40,11 @@ afterAll(async () => {
 });
 
 describe('Project-Lens over MCP', () => {
-  it('exposes exactly the 10 spec tools', async () => {
+  it('exposes exactly the 11 spec tools', async () => {
     const { tools } = await client.listTools();
     expect(tools.map(t => t.name).sort()).toEqual([
       'find_project',
+      'list_files',
       'list_groups',
       'list_projects',
       'map_workspace',

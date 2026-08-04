@@ -30,6 +30,7 @@ beforeAll(async () => {
         '.git': {},
         'README.md': '# ProjA\n',
         'main.ts': 'export class TransactionManager {}\n',
+        'lines.txt': 'l1\nl2\nl3\nl4\n',
         src: { 'a.ts': 'x\n' },
         '.hidden': { 'ignored.txt': 'x\n' }
       },
@@ -37,6 +38,10 @@ beforeAll(async () => {
         '.git': {},
         'notes.md': 'delegates to the TransactionManager\n',
         'big.txt': 'a'.repeat(BIG_FILE_CHARS)
+      },
+      SvnProj: {
+        '.svn': {},
+        'pom.xml': '<project/>'
       }
     },
     Solo: { '.git': {} }
@@ -58,8 +63,13 @@ describe('map_workspace', () => {
     const payload = jsonOf<{ map: Record<string, number>; total_groups: number }>(
       await client.callTool({ name: 'map_workspace', arguments: { max_depth: 1 } })
     );
-    expect(payload.map).toEqual({ Group: 2, '(root)': 1 });
+    expect(payload.map).toEqual({ Group: 3, '(root)': 1 });
     expect(payload.total_groups).toBe(1);
+  });
+
+  it('emits compact JSON', async () => {
+    const result = await client.callTool({ name: 'map_workspace', arguments: { max_depth: 1 } });
+    expect(textOf(result)).not.toContain('\n');
   });
 
   it("depth 3 lists each project's top-level folders, hiding dotfiles", async () => {
@@ -78,9 +88,9 @@ describe('map_workspace', () => {
       groupPath: 'Group',
       absolutePath: path.join(root, 'Group', 'never-existed'),
       root,
+      vcsType: 'git',
       detectedStack: [],
-      keyFiles: [],
-      scannedAt: Date.now()
+      keyFiles: []
     });
     const isolatedClient = await connect(isolated, config);
     try {
@@ -102,8 +112,49 @@ describe('list_projects', () => {
     expect(payload.projects.map(p => `${p.group}/${p.name}`)).toEqual([
       'Group/ProjA',
       'Group/ProjB',
+      'Group/SvnProj',
       '(root)/Solo'
     ]);
+    expect(payload.projects[0]).not.toHaveProperty('branch');
+    expect(payload.projects[0]).not.toHaveProperty('vcs_type');
+  });
+
+  it('include projects vcs and stack fields in one sweep', async () => {
+    const payload = jsonOf<{
+      projects: Array<{
+        name: string;
+        vcs_type: string;
+        branch: string | null;
+        is_clean: boolean | null;
+        stack: string[];
+      }>;
+    }>(
+      await client.callTool({
+        name: 'list_projects',
+        arguments: { group: 'Group', include: ['branch', 'is_clean', 'stack'] }
+      })
+    );
+    expect(payload.projects.map(p => p.name)).toEqual(['ProjA', 'ProjB', 'SvnProj']);
+    for (const p of payload.projects) {
+      expect(p).toHaveProperty('branch');
+      expect(p).toHaveProperty('is_clean');
+    }
+    const svn = payload.projects.find(p => p.name === 'SvnProj')!;
+    expect(svn.vcs_type).toBe('svn');
+    expect(svn.branch).toBeNull();
+    expect(svn.is_clean).toBeNull();
+    expect(svn.stack).toEqual(['Java']);
+    expect(payload.projects.find(p => p.name === 'ProjA')!.vcs_type).toBe('git');
+  });
+
+  it('include of stack alone runs no vcs queries and omits vcs_type', async () => {
+    const payload = jsonOf<{ projects: Array<Record<string, unknown>> }>(
+      await client.callTool({ name: 'list_projects', arguments: { group: 'Group', include: ['stack'] } })
+    );
+    expect(payload.projects[0]).toHaveProperty('stack');
+    expect(payload.projects[0]).not.toHaveProperty('vcs_type');
+    expect(payload.projects[0]).not.toHaveProperty('branch');
+    expect(payload.projects[0]).not.toHaveProperty('absolute_path');
   });
 });
 
@@ -146,6 +197,14 @@ describe('project_info', () => {
     expect(isError(result)).toBe(true);
     expect(textOf(result)).toMatch(/Project not found/);
   });
+
+  it('reports svn projects without invoking svn and carries no scanned_at', async () => {
+    const info = jsonOf<Record<string, unknown>>(
+      await client.callTool({ name: 'project_info', arguments: { name: 'SvnProj' } })
+    );
+    expect(info['vcs']).toEqual({ type: 'svn', remote: null, branch: null, is_clean: null });
+    expect(info).not.toHaveProperty('scanned_at');
+  });
 });
 
 describe('read_file', () => {
@@ -160,11 +219,77 @@ describe('read_file', () => {
     expect(content.length).toBeLessThan(BIG_FILE_CHARS);
   });
 
+  it('pages with offset and limit', async () => {
+    const content = textOf(
+      await client.callTool({
+        name: 'read_file',
+        arguments: { project: 'ProjA', relative_path: 'lines.txt', offset: 2, limit: 2 }
+      })
+    );
+    expect(content).toBe('l2\nl3');
+  });
+
+  it('reads from the first line when only limit is given', async () => {
+    const content = textOf(
+      await client.callTool({
+        name: 'read_file',
+        arguments: { project: 'ProjA', relative_path: 'lines.txt', limit: 1 }
+      })
+    );
+    expect(content).toBe('l1');
+  });
+
+  it('reads from offset to the end when limit is omitted', async () => {
+    const content = textOf(
+      await client.callTool({
+        name: 'read_file',
+        arguments: { project: 'ProjA', relative_path: 'lines.txt', offset: 4 }
+      })
+    );
+    expect(content).toBe('l4\n');
+  });
+
   it('rejects an unknown project', async () => {
     const result = await client.callTool({
       name: 'read_file',
       arguments: { project: 'Nope', relative_path: 'x' }
     });
     expect(isError(result)).toBe(true);
+  });
+});
+
+describe('list_files', () => {
+  it('lists project files relative to the root, skipping hidden dirs', async () => {
+    const payload = jsonOf<{ files: string[]; count: number; truncated: boolean }>(
+      await client.callTool({ name: 'list_files', arguments: { project: 'ProjA' } })
+    );
+    expect(payload.files).toEqual(['README.md', 'lines.txt', 'main.ts', 'src/a.ts']);
+    expect(payload.count).toBe(4);
+    expect(payload.truncated).toBe(false);
+  });
+
+  it('applies glob filters', async () => {
+    const payload = jsonOf<{ files: string[] }>(
+      await client.callTool({ name: 'list_files', arguments: { project: 'ProjA', glob: '*.ts' } })
+    );
+    expect(payload.files).toEqual(['main.ts', 'src/a.ts']);
+  });
+
+  it('rejects an unknown project', async () => {
+    const result = await client.callTool({ name: 'list_files', arguments: { project: 'Nope' } });
+    expect(isError(result)).toBe(true);
+  });
+});
+
+describe('search truncation', () => {
+  it('flags truncation when the limit cuts results', async () => {
+    const payload = jsonOf<{ truncated: boolean; matches_found: number }>(
+      await client.callTool({
+        name: 'search',
+        arguments: { query: 'TransactionManager', group: 'Group', limit: 1 }
+      })
+    );
+    expect(payload.matches_found).toBe(1);
+    expect(payload.truncated).toBe(true);
   });
 });

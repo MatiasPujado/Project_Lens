@@ -1,8 +1,9 @@
 # Project-Lens
 
-MCP server that gives Claude a map of your local project setup: a registry of group folders and git projects discovered under configured roots, with scoped read/search/write operations that can never escape a project root.
+MCP server that gives Claude a map of your local project setup: a registry of group folders and VCS projects discovered under configured roots, with scoped read/search/write operations that can never escape a project root.
 
-- **Discovery**: a directory containing `.git` is a project; the folders between a root and the project form its group path (arbitrary depth, e.g. `Prisma/NEWPAY/Homebanking`).
+- **Discovery**: a directory containing `.git` or `.svn` is a project (`vcs_type: git | svn`); the folders between a root and the project form its group path (arbitrary depth, e.g. `Prisma/NEWPAY/Homebanking`). SVN working copies are indexed and visible, but the `svn` binary is never invoked — their remote/branch/clean state stays `null`.
+- **Token economy**: all structured responses are compact JSON; capped lists carry an explicit `truncated` flag; `list_projects` takes an `include` projection so a whole-group metadata sweep is one call instead of N `project_info` calls.
 - **Freshness**: full scan at startup, explicit `refresh_registry` tool, plus mtime revalidation of root/group dirs piggybacked on registry calls. No filesystem watcher, no disk cache.
 - **Protocol**: MCP revision 2026-07-28 (stateless core) via the official `@modelcontextprotocol/server` v2 SDK, stdio transport. Legacy 2025-era clients are also served by SDK version negotiation.
 
@@ -91,11 +92,12 @@ Registered from the Claude_Toolbox plugin (`toolbox-servers/.mcp.json`), same pa
 |---|---|
 | `map_workspace(max_depth?)` | Tree overview: 1 = groups, 2 = groups → projects (default), 3 = + each project's top-level folders |
 | `list_groups` | Flat list of group paths |
-| `list_projects(group?)` | Projects, optionally filtered by group |
+| `list_projects(group?, include?)` | Projects, optionally filtered by group; `include: ["branch", "is_clean", "stack"]` adds live per-project metadata for bulk sweeps |
 | `find_project(query)` | Fuzzy name match → group + absolute path |
-| `project_info(name)` | Path, git remote/branch/clean state, detected stack, key manifests, README snippet (git/README resolved lazily) |
-| `search(query, project\|group, glob?)` | ripgrep content search confined to one project or group |
-| `read_file(project, relative_path)` | Scoped read; `../`, absolute-path and symlink escapes rejected |
+| `project_info(name)` | Path, vcs remote/branch/clean state (queried live on every call), detected stack, key manifests, README snippet |
+| `search(query, project\|group, glob?, limit?)` | ripgrep content search confined to one project or group; `limit` default 50, max 500, `truncated` flag on cut |
+| `list_files(project, glob?)` | File paths relative to the project root (respects `.gitignore`, skips hidden files); capped at 500 + `truncated` flag |
+| `read_file(project, relative_path, offset?, limit?)` | Scoped read with optional line paging; `../`, absolute-path and symlink escapes rejected |
 | `write_file(project, relative_path, content)` | Scoped write, same traversal guard; creates parent dirs inside the root |
 | `scaffold_project(group, name, {readme?, gitignore?})` | **User-initiated only.** Create `<group>/<name>` + `git init`. No network |
 | `refresh_registry` | Force full re-scan, returns scan stats |

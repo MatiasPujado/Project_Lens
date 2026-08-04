@@ -10,7 +10,12 @@ export interface SearchHit {
   excerpt: string;
 }
 
-const MAX_RESULTS = 100;
+export interface SearchResult {
+  hits: SearchHit[];
+  truncated: boolean;
+}
+
+export const MAX_FILES = 500;
 
 function runRg(args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -28,11 +33,10 @@ function runRg(args: string[]): Promise<string> {
   });
 }
 
-export function parseRgOutput(stdout: string, projects: ProjectNode[]): SearchHit[] {
+export function parseRgOutput(stdout: string, projects: ProjectNode[], limit: number): SearchResult {
   const byPathDesc = [...projects].sort((a, b) => b.absolutePath.length - a.absolutePath.length);
   const hits: SearchHit[] = [];
   for (const line of stdout.split('\n')) {
-    if (hits.length >= MAX_RESULTS) break;
     if (!line) continue;
     let event: { type: string; data: { path: { text?: string }; line_number: number; lines: { text?: string } } };
     try {
@@ -47,6 +51,7 @@ export function parseRgOutput(stdout: string, projects: ProjectNode[]): SearchHi
       p => file === p.absolutePath || file.startsWith(p.absolutePath + path.sep)
     );
     if (!owner) continue;
+    if (hits.length === limit) return { hits, truncated: true };
     hits.push({
       project: owner.name,
       file: path.relative(owner.absolutePath, file),
@@ -54,17 +59,34 @@ export function parseRgOutput(stdout: string, projects: ProjectNode[]): SearchHi
       excerpt: (event.data.lines.text ?? '').trimEnd().slice(0, 300)
     });
   }
-  return hits;
+  return { hits, truncated: false };
 }
 
 export async function searchScope(
   scopeDir: string,
   projects: ProjectNode[],
   query: string,
-  glob?: string
-): Promise<SearchHit[]> {
+  glob: string | undefined,
+  limit: number
+): Promise<SearchResult> {
   const args = ['--json', '--max-count', '20', '-e', query];
   if (glob) args.push('-g', glob);
   args.push('--', scopeDir);
-  return parseRgOutput(await runRg(args), projects);
+  return parseRgOutput(await runRg(args), projects, limit);
+}
+
+export async function listFiles(
+  project: ProjectNode,
+  glob?: string
+): Promise<{ files: string[]; truncated: boolean }> {
+  const args = ['--files'];
+  if (glob) args.push('-g', glob);
+  args.push('--', project.absolutePath);
+  const stdout = await runRg(args);
+  const files = stdout
+    .split('\n')
+    .filter(f => f !== '' && !isSecretFile(f))
+    .map(f => path.relative(project.absolutePath, f))
+    .sort();
+  return { files: files.slice(0, MAX_FILES), truncated: files.length > MAX_FILES };
 }

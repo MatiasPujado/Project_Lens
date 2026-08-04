@@ -4,7 +4,7 @@ import { promisify } from 'node:util';
 const run = promisify(execFile);
 
 export interface VcsInfo {
-  type: 'git';
+  type: 'git' | 'svn';
   remote: string | null;
   branch: string | null;
   is_clean: boolean | null;
@@ -36,4 +36,10 @@ export async function gitInfo(dir: string): Promise<VcsInfo> {
     branch,
     is_clean: status === null ? null : status === ''
   };
+}
+
+/** SVN working copies are indexed but never queried — the svn binary is not invoked. */
+export async function vcsInfo(vcsType: 'git' | 'svn', dir: string): Promise<VcsInfo> {
+  if (vcsType === 'git') return gitInfo(dir);
+  return { type: 'svn', remote: null, branch: null, is_clean: null };
 }
