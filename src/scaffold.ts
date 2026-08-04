@@ -77,10 +77,10 @@ export async function scaffoldProject(
     groupPath: group,
     absolutePath: target,
     root: owningRoot,
+    vcsType: 'git',
     detectedStack: [],
     keyFiles: [],
-    readmePath: opts.readme ? path.join(target, 'README.md') : undefined,
-    scannedAt: Date.now()
+    readmePath: opts.readme ? path.join(target, 'README.md') : undefined
   };
   registry.add(node);
   return node;

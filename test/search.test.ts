@@ -1,8 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Registry } from '../src/registry.js';
-import { parseRgOutput, searchScope } from '../src/search.js';
+import { listFiles, parseRgOutput, searchScope } from '../src/search.js';
 import type { ProjectNode } from '../src/types.js';
 import { cleanup, makeWorkspace } from './helpers.js';
+
+const LIMIT = 50;
 
 let root: string;
 let registry: Registry;
@@ -29,13 +31,16 @@ afterAll(() => cleanup(root));
 
 describe('searchScope', () => {
   it('finds matches across a group and maps them to projects', async () => {
-    const hits = await searchScope(
+    const { hits, truncated } = await searchScope(
       `${root}/Group`,
       registry.getAll(),
-      'TransactionManager'
+      'TransactionManager',
+      undefined,
+      LIMIT
     );
     const projects = hits.map(h => h.project).sort();
     expect(projects).toEqual(['ProjA', 'ProjB']);
+    expect(truncated).toBe(false);
     const a = hits.find(h => h.project === 'ProjA')!;
     expect(a.file).toBe('main.ts');
     expect(a.line).toBe(1);
@@ -43,35 +48,64 @@ describe('searchScope', () => {
   });
 
   it('applies glob filters', async () => {
-    const hits = await searchScope(`${root}/Group`, registry.getAll(), 'TransactionManager', '*.md');
+    const { hits } = await searchScope(`${root}/Group`, registry.getAll(), 'TransactionManager', '*.md', LIMIT);
     expect(hits.map(h => h.project)).toEqual(['ProjB']);
   });
 
   it('never returns secret-pattern files', async () => {
-    const hits = await searchScope(`${root}/Group`, registry.getAll(), 'TransactionManager');
+    const { hits } = await searchScope(`${root}/Group`, registry.getAll(), 'TransactionManager', undefined, LIMIT);
     expect(hits.some(h => h.file.includes('.env'))).toBe(false);
   });
 
   it('returns empty on no matches', async () => {
-    await expect(searchScope(`${root}/Group`, registry.getAll(), 'zzz_nothing')).resolves.toEqual([]);
+    await expect(
+      searchScope(`${root}/Group`, registry.getAll(), 'zzz_nothing', undefined, LIMIT)
+    ).resolves.toEqual({ hits: [], truncated: false });
+  });
+
+  it('signals truncation when matches exceed the limit', async () => {
+    const { hits, truncated } = await searchScope(
+      `${root}/Group`,
+      registry.getAll(),
+      'TransactionManager',
+      undefined,
+      1
+    );
+    expect(hits).toHaveLength(1);
+    expect(truncated).toBe(true);
   });
 
   it('fails loudly when ripgrep rejects the pattern', async () => {
-    await expect(searchScope(`${root}/Group`, registry.getAll(), '[')).rejects.toThrow(
-      /ripgrep failed/
-    );
+    await expect(
+      searchScope(`${root}/Group`, registry.getAll(), '[', undefined, LIMIT)
+    ).rejects.toThrow(/ripgrep failed/);
   });
 
   it('explains when ripgrep is not on PATH', async () => {
     const previous = process.env.PATH;
     process.env.PATH = '';
     try {
-      await expect(searchScope(`${root}/Group`, registry.getAll(), 'x')).rejects.toThrow(
-        /ripgrep \(rg\) is not installed/
-      );
+      await expect(
+        searchScope(`${root}/Group`, registry.getAll(), 'x', undefined, LIMIT)
+      ).rejects.toThrow(/ripgrep \(rg\) is not installed/);
     } finally {
       process.env.PATH = previous;
     }
+  });
+});
+
+describe('listFiles', () => {
+  it('lists project files relative to its root, skipping secret files', async () => {
+    const projA = registry.resolve('ProjA');
+    const { files, truncated } = await listFiles(projA);
+    expect(files).toEqual(['main.ts']);
+    expect(truncated).toBe(false);
+  });
+
+  it('applies glob filters', async () => {
+    const projB = registry.resolve('ProjB');
+    const { files } = await listFiles(projB, '*.md');
+    expect(files).toEqual(['docs/arch.md']);
   });
 });
 
@@ -81,9 +115,9 @@ describe('parseRgOutput', () => {
     groupPath: 'Group',
     absolutePath: '/w/Group/ProjA',
     root: '/w',
+    vcsType: 'git',
     detectedStack: [],
-    keyFiles: [],
-    scannedAt: 0
+    keyFiles: []
   };
 
   function match(file: string, line = 1, text = 'hit\n'): string {
@@ -95,7 +129,7 @@ describe('parseRgOutput', () => {
 
   it('skips malformed lines instead of aborting the whole search', () => {
     const stdout = ['not json at all', match('/w/Group/ProjA/main.ts')].join('\n');
-    expect(parseRgOutput(stdout, [project])).toEqual([
+    expect(parseRgOutput(stdout, [project], LIMIT).hits).toEqual([
       { project: 'ProjA', file: 'main.ts', line: 1, excerpt: 'hit' }
     ]);
   });
@@ -107,7 +141,7 @@ describe('parseRgOutput', () => {
       match('/elsewhere/other.ts'),
       match('/w/Group/ProjA-sibling/other.ts')
     ].join('\n');
-    expect(parseRgOutput(stdout, [project])).toEqual([]);
+    expect(parseRgOutput(stdout, [project], LIMIT).hits).toEqual([]);
   });
 
   it('tolerates a match event carrying no line text', () => {
@@ -115,7 +149,7 @@ describe('parseRgOutput', () => {
       type: 'match',
       data: { path: { text: '/w/Group/ProjA/main.ts' }, line_number: 3, lines: {} }
     });
-    expect(parseRgOutput(stdout, [project])[0]!.excerpt).toBe('');
+    expect(parseRgOutput(stdout, [project], LIMIT).hits[0]!.excerpt).toBe('');
   });
 
   it('drops secret-pattern files and truncates long excerpts', () => {
@@ -123,15 +157,20 @@ describe('parseRgOutput', () => {
       match('/w/Group/ProjA/.env'),
       match('/w/Group/ProjA/main.ts', 2, 'x'.repeat(400))
     ].join('\n');
-    const hits = parseRgOutput(stdout, [project]);
+    const { hits } = parseRgOutput(stdout, [project], LIMIT);
     expect(hits).toHaveLength(1);
     expect(hits[0]!.excerpt).toHaveLength(300);
   });
 
-  it('caps the result list', () => {
+  it('caps the result list at the limit and flags the cut', () => {
     const stdout = Array.from({ length: 150 }, (_, i) =>
       match('/w/Group/ProjA/main.ts', i + 1)
     ).join('\n');
-    expect(parseRgOutput(stdout, [project])).toHaveLength(100);
+    const capped = parseRgOutput(stdout, [project], 100);
+    expect(capped.hits).toHaveLength(100);
+    expect(capped.truncated).toBe(true);
+    const uncapped = parseRgOutput(stdout, [project], 200);
+    expect(uncapped.hits).toHaveLength(150);
+    expect(uncapped.truncated).toBe(false);
   });
 });

@@ -3,10 +3,10 @@ export interface ProjectNode {
   groupPath: string;
   absolutePath: string;
   root: string;
+  vcsType: 'git' | 'svn';
   detectedStack: string[];
   keyFiles: string[];
   readmePath?: string;
-  scannedAt: number;
 }
 
 export interface LensConfig {
