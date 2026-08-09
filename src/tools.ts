@@ -3,7 +3,7 @@ import path from 'node:path';
 import { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { vcsInfo } from './git.js';
-import { projectKey, type Registry } from './registry.js';
+import { byName, projectKey, type Registry } from './registry.js';
 import { scaffoldProject } from './scaffold.js';
 import { listFiles, searchScope } from './search.js';
 import { isSecretFile, resolveWithin } from './security.js';
@@ -11,6 +11,12 @@ import type { LensConfig, ProjectNode } from './types.js';
 
 const MAX_READ_CHARS = 500_000;
 const README_SNIPPET_LINES = 10;
+
+const PROJECT_KEY_DESC =
+  "Project name ('Homebanking') or group-qualified path ('Prisma/NEWPAY/Homebanking') when the " +
+  'name is ambiguous. Matching is case-insensitive; a miss lists the closest names.';
+
+const projectKeyArg = z.string().min(1).describe(PROJECT_KEY_DESC);
 
 type ToolResult = { content: Array<{ type: 'text'; text: string }>; isError?: boolean };
 
@@ -50,8 +56,26 @@ function inGroup(node: ProjectNode, group: string): boolean {
   return node.groupPath === group || node.groupPath.startsWith(group + '/');
 }
 
+/**
+ * Directories handed to ripgrep. Searching the registered project dirs rather than the roots
+ * keeps rg out of everything the registry excluded or never registered. Those hits would be
+ * discarded during attribution anyway.
+ */
+async function scopeDirsFor(scoped: ProjectNode[], pathPrefix?: string): Promise<string[]> {
+  if (pathPrefix === undefined) return scoped.map(n => n.absolutePath);
+  const dirs: string[] = [];
+  for (const node of scoped) {
+    try {
+      dirs.push(await resolveWithin(node.absolutePath, pathPrefix));
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; // escapes must surface
+    }
+  }
+  return dirs;
+}
+
 export function buildServer(registry: Registry, config: LensConfig): McpServer {
-  const server = new McpServer({ name: 'project-lens', version: '0.2.0' });
+  const server = new McpServer({ name: 'project-lens', version: '0.3.0' });
 
   server.registerTool(
     'map_workspace',
@@ -71,14 +95,16 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
         if (max_depth === 1) {
           map[key] = ((map[key] as number) ?? 0) + 1;
         } else if (max_depth === 2) {
-          ((map[key] ??= []) as string[]).push(node.name);
+          map[key] ??= [];
+          (map[key] as string[]).push(node.name);
         } else {
           const entries = await readdir(node.absolutePath, { withFileTypes: true }).catch(() => []);
           const folders = entries
             .filter(e => e.isDirectory() && !e.name.startsWith('.'))
             .map(e => e.name)
-            .sort();
-          ((map[key] ??= {}) as Record<string, string[]>)[node.name] = folders;
+            .sort(byName);
+          map[key] ??= {};
+          (map[key] as Record<string, string[]>)[node.name] = folders;
         }
       }
       return json({
@@ -164,10 +190,7 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
       description:
         'Full metadata for one project: path, vcs state (queried live on every call), detected stack, ' +
         'key files, README snippet.',
-      inputSchema: z.object({
-        name: z.string().min(1)
-          .describe("Project name or group-qualified path ('Prisma/NEWPAY/Homebanking') when ambiguous.")
-      })
+      inputSchema: z.object({ name: projectKeyArg })
     },
     guarded(async ({ name }) => {
       await registry.revalidate();
@@ -191,39 +214,64 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
   server.registerTool(
     'search',
     {
-      description: 'Content search (ripgrep) confined to one project or one group.',
+      description:
+        'Content search (ripgrep) over one project, one group, or every registered project. ' +
+        'Narrow before widening: project or group plus path_prefix and glob costs a fraction of ' +
+        'scope:"all". Results are grouped by file.',
       inputSchema: z.object({
         query: z.string().min(1).describe('Content search pattern (literal or regex).'),
-        project: z.string().optional().describe('Confine to one project.'),
-        group: z.string().optional().describe('Confine to a group path. Exactly one of project|group required.'),
+        project: z.string().optional().describe(`Confine to one project. ${PROJECT_KEY_DESC}`),
+        group: z.string().optional().describe("Confine to a group path, e.g. 'Prisma/NEWPAY'."),
+        scope: z.literal('all').optional()
+          .describe('Search every registered project in one call. Exactly one of project|group|scope required.'),
+        path_prefix: z.string().optional()
+          .describe("Subdirectory of each project to search, e.g. 'src'. Prunes the walk rather than " +
+            'filtering after it; projects lacking the subdirectory are skipped.'),
         glob: z.string().optional().describe("Optional filename filter, e.g. '*.ts'."),
+        exclude: z.array(z.string().min(1)).optional()
+          .describe("Directory names or globs to skip, e.g. ['test', 'fixtures']. Persistent workspace " +
+            'noise belongs in the exclude list of the config file instead.'),
+        context_lines: z.number().int().min(0).max(3).default(0)
+          .describe('Lines of surrounding context per hit. Costs tokens per hit; saves a read_file call.'),
         limit: z.number().int().min(1).max(500).default(50)
-          .describe('Max results returned; truncated flag set when more exist.')
+          .describe('Max hits returned across all files; truncated flag set when more exist.')
       })
     },
-    guarded(async ({ query, project, group, glob, limit }) => {
-      if (!!project === !!group) {
-        throw new Error('Exactly one of "project" or "group" is required');
+    guarded(async ({ query, project, group, scope, path_prefix, glob, exclude, context_lines, limit }) => {
+      if ([project, group, scope].filter(Boolean).length !== 1) {
+        throw new Error('Exactly one of "project", "group" or "scope" is required');
       }
       await registry.revalidate();
-      let scopeDir: string;
       let scoped: ProjectNode[];
+      let scopeLabel: Record<string, string>;
       if (project) {
-        const node = registry.resolve(project);
-        scopeDir = node.absolutePath;
-        scoped = [node];
-      } else {
-        scoped = registry.getAll().filter(n => inGroup(n, group!));
+        scoped = [registry.resolve(project)];
+        scopeLabel = { project };
+      } else if (group) {
+        scoped = registry.getAll().filter(n => inGroup(n, group));
         if (scoped.length === 0) throw new Error(`Unknown group: "${group}"`);
-        scopeDir = path.join(scoped[0]!.root, ...group!.split('/'));
+        scopeLabel = { group };
+      } else {
+        scoped = registry.getAll();
+        scopeLabel = { scope: 'all' };
       }
-      const { hits, truncated } = await searchScope(scopeDir, scoped, query, glob, limit);
+      const scopeDirs = await scopeDirsFor(scoped, path_prefix);
+      if (scopeDirs.length === 0 && path_prefix !== undefined) {
+        throw new Error(`No project in scope contains the subdirectory "${path_prefix}"`);
+      }
+      const { files, hitsReturned, truncated } = await searchScope(scopeDirs, scoped, query, {
+        limit,
+        glob,
+        exclude,
+        contextLines: context_lines
+      });
       return json({
         query,
-        scope: project ? { project } : { group },
-        matches_found: hits.length,
+        scope: scopeLabel,
+        files_matched: files.length,
+        hits_returned: hitsReturned,
         truncated,
-        results: hits
+        results: files
       });
     })
   );
@@ -231,9 +279,12 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
   server.registerTool(
     'read_file',
     {
-      description: 'Read a file inside a registered project. Paths escaping the project root are rejected.',
+      description:
+        'Read a file inside a registered project. Paths escaping the project root are rejected — ' +
+        'absolute paths, ../ traversal and symlinks pointing outside all fail. ' +
+        'Secret-pattern files (.env*, *.pem, id_rsa*, *credentials*) are never returned.',
       inputSchema: z.object({
-        project: z.string().min(1),
+        project: projectKeyArg,
         relative_path: z.string().min(1).describe('Path relative to project root. Escapes rejected.'),
         offset: z.number().int().min(1).optional().describe('1-based line to start reading from.'),
         limit: z.number().int().min(1).optional().describe('Max lines to read.')
@@ -242,6 +293,9 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
     guarded(async ({ project, relative_path, offset, limit }) => {
       const node = registry.resolve(project);
       const resolved = await resolveWithin(node.absolutePath, relative_path);
+      if (isSecretFile(resolved)) {
+        throw new Error(`Refusing to read a secret-pattern file: ${relative_path}`);
+      }
       let content = await fsReadFile(resolved, 'utf8');
       if (offset !== undefined || limit !== undefined) {
         const start = (offset ?? 1) - 1;
@@ -263,7 +317,7 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
         'List file paths inside a registered project (respects .gitignore, skips hidden files). ' +
         'Paths are relative to the project root.',
       inputSchema: z.object({
-        project: z.string().min(1),
+        project: projectKeyArg,
         glob: z.string().optional().describe("Optional filename filter, e.g. '*.ts'.")
       })
     },
@@ -274,14 +328,33 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
     })
   );
 
+  if (config.allowWrites) registerWriteTools(server, registry, config);
+
+  server.registerTool(
+    'refresh_registry',
+    {
+      description: 'Force a full re-scan of all configured roots. Returns scan stats.',
+      inputSchema: z.object({})
+    },
+    guarded(async () => json(await registry.refresh()))
+  );
+
+  return server;
+}
+
+/** Registered only when allow_writes is on: everything here mutates the workspace. */
+function registerWriteTools(server: McpServer, registry: Registry, config: LensConfig): void {
   server.registerTool(
     'write_file',
     {
-      description: 'Write a file inside a registered project. Paths escaping the project root are rejected.',
+      description:
+        'Write a file inside a registered project. Paths escaping the project root are rejected — ' +
+        'absolute paths, ../ traversal and symlinks pointing outside all fail.',
       inputSchema: z.object({
-        project: z.string().min(1),
-        relative_path: z.string().min(1),
-        content: z.string()
+        project: projectKeyArg,
+        relative_path: z.string().min(1)
+          .describe('Path relative to project root. Missing parent directories are created. Escapes rejected.'),
+        content: z.string().describe('Full file content; an existing file is overwritten, not appended to.')
       })
     },
     guarded(async ({ project, relative_path, content }) => {
@@ -306,8 +379,8 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
         group: z.string().min(1).describe('Existing group path the project goes under.'),
         name: z.string().min(1)
           .describe('New project dir name. Validated: no separators, no shell metacharacters.'),
-        readme: z.boolean().default(false),
-        gitignore: z.boolean().default(false)
+        readme: z.boolean().default(false).describe('Seed the project with a README.md.'),
+        gitignore: z.boolean().default(false).describe('Seed the project with a .gitignore.')
       })
     },
     guarded(async ({ group, name, readme, gitignore }) => {
@@ -315,15 +388,4 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
       return json({ created: node.absolutePath, group: node.groupPath, name: node.name });
     })
   );
-
-  server.registerTool(
-    'refresh_registry',
-    {
-      description: 'Force a full re-scan of all configured roots. Returns scan stats.',
-      inputSchema: z.object({})
-    },
-    guarded(async () => json(await registry.refresh()))
-  );
-
-  return server;
 }

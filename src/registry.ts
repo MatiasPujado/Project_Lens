@@ -1,4 +1,5 @@
 import { stat } from 'node:fs/promises';
+import { excludeFor } from './config.js';
 import { scanRoot } from './discovery.js';
 import type { LensConfig, ProjectNode } from './types.js';
 
@@ -9,14 +10,21 @@ export interface ScanStats {
   duration_ms: number;
 }
 
+/**
+ * The locale is pinned on purpose. `localeCompare` with no locale follows the host's default, so an
+ * unpinned call would order group and project names differently on different machines, and these
+ * orderings go out in tool responses, which are compared across runs.
+ */
+export const byName = (a: string, b: string): number => a.localeCompare(b, 'en');
+
 export function projectKey(node: ProjectNode): string {
   return node.groupPath ? `${node.groupPath}/${node.name}` : node.name;
 }
 
 export class Registry {
-  private nodes = new Map<string, ProjectNode>();
-  private dirMtimes = new Map<string, number>();
-  private rootOfDir = new Map<string, string>();
+  private readonly nodes = new Map<string, ProjectNode>();
+  private readonly dirMtimes = new Map<string, number>();
+  private readonly rootOfDir = new Map<string, string>();
 
   constructor(private readonly config: LensConfig) {}
 
@@ -45,7 +53,7 @@ export class Registry {
     for (const [key, node] of this.nodes) {
       if (node.root === root) this.nodes.delete(key);
     }
-    const { projects, groupDirs } = await scanRoot(root, this.config.exclude);
+    const { projects, groupDirs } = await scanRoot(root, excludeFor(this.config, root));
     for (const node of projects) this.nodes.set(projectKey(node), node);
     for (const dir of groupDirs) {
       this.rootOfDir.set(dir, root);
@@ -77,7 +85,7 @@ export class Registry {
 
   groups(): string[] {
     const groups = new Set(this.getAll().map(n => n.groupPath).filter(g => g !== ''));
-    return [...groups].sort();
+    return [...groups].sort(byName);
   }
 
   find(query: string): ProjectNode[] {
@@ -91,22 +99,28 @@ export class Registry {
       else if (name.includes(q)) score = 1;
       if (score > 0) scored.push([score, node]);
     }
-    return scored
-      .sort((a, b) => b[0] - a[0] || a[1].name.localeCompare(b[1].name))
-      .slice(0, 10)
-      .map(([, node]) => node);
+    scored.sort((a, b) => b[0] - a[0] || byName(a[1].name, b[1].name));
+    return scored.slice(0, 10).map(([, node]) => node);
   }
 
   resolve(nameOrPath: string): ProjectNode {
     const byKey = this.nodes.get(nameOrPath);
     if (byKey) return byKey;
-    const byName = this.getAll().filter(n => n.name === nameOrPath);
-    if (byName.length === 1) return byName[0]!;
-    if (byName.length > 1) {
-      const keys = byName.map(projectKey).join(', ');
+    const q = nameOrPath.toLowerCase();
+    const matches = this.getAll().filter(
+      n => n.name.toLowerCase() === q || projectKey(n).toLowerCase() === q
+    );
+    if (matches.length === 1) return matches[0]!;
+    if (matches.length > 1) {
+      const keys = matches.map(projectKey).join(', ');
       throw new Error(`Project name "${nameOrPath}" is ambiguous; use one of: ${keys}`);
     }
-    throw new Error(`Project not found: "${nameOrPath}". Try find_project first.`);
+    const candidates = this.find(nameOrPath).slice(0, 5).map(projectKey);
+    throw new Error(
+      candidates.length > 0
+        ? `Project not found: "${nameOrPath}". Closest matches: ${candidates.join(', ')}`
+        : `Project not found: "${nameOrPath}". Try find_project first.`
+    );
   }
 
   add(node: ProjectNode): void {
