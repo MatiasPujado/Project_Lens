@@ -9,6 +9,13 @@ import { cleanup, isError, jsonOf, makeWorkspace, notRoot, textOf } from './help
 
 const BIG_FILE_CHARS = 600_000;
 
+interface SearchPayload {
+  results: Array<{ project: string; file: string; lines: Array<[number, string]> }>;
+  files_matched: number;
+  hits_returned: number;
+  truncated: boolean;
+}
+
 let root: string;
 let config: LensConfig;
 let registry: Registry;
@@ -32,11 +39,12 @@ beforeAll(async () => {
         'main.ts': 'export class TransactionManager {}\n',
         'lines.txt': 'l1\nl2\nl3\nl4\n',
         src: { 'a.ts': 'x\n' },
-        '.hidden': { 'ignored.txt': 'x\n' }
+        '.hidden': { 'ignored.txt': 'x\n' },
+        '.env': 'API_TOKEN=s3cret\n'
       },
       ProjB: {
         '.git': {},
-        'notes.md': 'delegates to the TransactionManager\n',
+        docs: { 'arch.md': 'context above\ndelegates to the TransactionManager\ncontext below\n' },
         'big.txt': 'a'.repeat(BIG_FILE_CHARS)
       },
       SvnProj: {
@@ -46,7 +54,7 @@ beforeAll(async () => {
     },
     Solo: { '.git': {} }
   });
-  config = { roots: [root], exclude: [] };
+  config = { roots: [root], exclude: [], allowWrites: true };
   registry = new Registry(config);
   await registry.initialize();
   client = await connect(registry, config);
@@ -77,7 +85,7 @@ describe('map_workspace', () => {
       await client.callTool({ name: 'map_workspace', arguments: { max_depth: 3 } })
     );
     expect(payload.map['Group']!['ProjA']).toEqual(['src']);
-    expect(payload.map['Group']!['ProjB']).toEqual([]);
+    expect(payload.map['Group']!['ProjB']).toEqual(['docs']);
   });
 
   it('depth 3 tolerates a project directory it cannot read', async () => {
@@ -156,17 +164,134 @@ describe('list_projects', () => {
 
 describe('search', () => {
   it('scoped by group maps hits across every project in it', async () => {
-    const payload = jsonOf<{ results: Array<{ project: string }>; matches_found: number }>(
+    const payload = jsonOf<SearchPayload>(
       await client.callTool({ name: 'search', arguments: { query: 'TransactionManager', group: 'Group' } })
     );
     expect([...new Set(payload.results.map(r => r.project))].sort()).toEqual(['ProjA', 'ProjB']);
-    expect(payload.matches_found).toBe(payload.results.length);
+    expect(payload.files_matched).toBe(payload.results.length);
+    expect(payload.hits_returned).toBe(payload.results.reduce((n, r) => n + r.lines.length, 0));
+  });
+
+  it('groups every hit in a file under a single entry', async () => {
+    const payload = jsonOf<SearchPayload>(
+      await client.callTool({
+        name: 'search',
+        arguments: { query: 'TransactionManager', project: 'ProjA' }
+      })
+    );
+    expect(payload.results).toHaveLength(new Set(payload.results.map(r => r.file)).size);
+  });
+
+  it('path_prefix narrows the walk to a subdirectory', async () => {
+    const inside = jsonOf<SearchPayload>(
+      await client.callTool({
+        name: 'search',
+        arguments: { query: 'TransactionManager', group: 'Group', path_prefix: 'docs' }
+      })
+    );
+    expect([...new Set(inside.results.map(r => r.project))]).toEqual(['ProjB']);
+    expect(inside.results.every(r => r.file.startsWith('docs/'))).toBe(true);
+  });
+
+  it('rejects a path_prefix that escapes the project root', async () => {
+    const result = await client.callTool({
+      name: 'search',
+      arguments: { query: 'x', project: 'ProjA', path_prefix: '../..' }
+    });
+    expect(isError(result)).toBe(true);
+    expect(textOf(result)).toMatch(/escapes the project root/);
+  });
+
+  it('reports when no project in scope has the path_prefix', async () => {
+    const result = await client.callTool({
+      name: 'search',
+      arguments: { query: 'x', group: 'Group', path_prefix: 'no_such_dir' }
+    });
+    expect(isError(result)).toBe(true);
+    expect(textOf(result)).toMatch(/No project in scope contains the subdirectory "no_such_dir"/);
+  });
+
+  it('exclude prunes directories by bare name', async () => {
+    const payload = jsonOf<SearchPayload>(
+      await client.callTool({
+        name: 'search',
+        arguments: { query: 'TransactionManager', group: 'Group', exclude: ['docs'] }
+      })
+    );
+    expect([...new Set(payload.results.map(r => r.project))]).toEqual(['ProjA']);
+  });
+
+  it('context_lines widens each excerpt around its match', async () => {
+    const payload = jsonOf<SearchPayload>(
+      await client.callTool({
+        name: 'search',
+        arguments: { query: 'TransactionManager', project: 'ProjB', context_lines: 1 }
+      })
+    );
+    expect(payload.results[0]!.lines[0]![1]).toContain('TransactionManager');
   });
 
   it('rejects an unknown group', async () => {
     const result = await client.callTool({ name: 'search', arguments: { query: 'x', group: 'NoSuch' } });
     expect(isError(result)).toBe(true);
     expect(textOf(result)).toMatch(/Unknown group: "NoSuch"/);
+  });
+
+  it('requires exactly one scope selector', async () => {
+    for (const args of [
+      { query: 'x' },
+      { query: 'x', project: 'ProjA', group: 'Group' },
+      { query: 'x', group: 'Group', scope: 'all' }
+    ]) {
+      const result = await client.callTool({ name: 'search', arguments: args });
+      expect(isError(result)).toBe(true);
+      expect(textOf(result)).toMatch(/Exactly one of/);
+    }
+  });
+
+  it('scope "all" sweeps every root in one call', async () => {
+    const other = await makeWorkspace({
+      Group: { ProjC: { '.git': {}, 'c.ts': 'const TransactionManager = 1\n' } }
+    });
+    const multi = { roots: [root, other], exclude: [], allowWrites: false };
+    const multiRegistry = new Registry(multi);
+    await multiRegistry.initialize();
+    const multiClient = await connect(multiRegistry, multi);
+    try {
+      const payload = jsonOf<{ results: Array<{ project: string }>; scope: unknown }>(
+        await multiClient.callTool({
+          name: 'search',
+          arguments: { query: 'TransactionManager', scope: 'all' }
+        })
+      );
+      expect([...new Set(payload.results.map(r => r.project))].sort()).toEqual(['ProjA', 'ProjB', 'ProjC']);
+      expect(payload.scope).toEqual({ scope: 'all' });
+    } finally {
+      await multiClient.close();
+      await cleanup(other);
+    }
+  });
+
+  it('searches a group that exists under more than one root', async () => {
+    const other = await makeWorkspace({
+      Group: { ProjC: { '.git': {}, 'c.ts': 'const TransactionManager = 1\n' } }
+    });
+    const multi = { roots: [root, other], exclude: [], allowWrites: false };
+    const multiRegistry = new Registry(multi);
+    await multiRegistry.initialize();
+    const multiClient = await connect(multiRegistry, multi);
+    try {
+      const payload = jsonOf<{ results: Array<{ project: string }> }>(
+        await multiClient.callTool({
+          name: 'search',
+          arguments: { query: 'TransactionManager', group: 'Group' }
+        })
+      );
+      expect([...new Set(payload.results.map(r => r.project))].sort()).toEqual(['ProjA', 'ProjB', 'ProjC']);
+    } finally {
+      await multiClient.close();
+      await cleanup(other);
+    }
   });
 });
 
@@ -204,6 +329,16 @@ describe('project_info', () => {
 });
 
 describe('read_file', () => {
+  it('refuses secret-pattern files that search and list_files already hide', async () => {
+    const result = await client.callTool({
+      name: 'read_file',
+      arguments: { project: 'ProjA', relative_path: '.env' }
+    });
+    expect(isError(result)).toBe(true);
+    expect(textOf(result)).toMatch(/Refusing to read a secret-pattern file/);
+    expect(textOf(result)).not.toContain('s3cret');
+  });
+
   it('truncates files past the read cap', async () => {
     const content = textOf(
       await client.callTool({
@@ -277,15 +412,55 @@ describe('list_files', () => {
   });
 });
 
+describe('search over an excluded workspace', () => {
+  let excludedRoot: string;
+  let excludedClient: Client;
+
+  beforeAll(async () => {
+    excludedRoot = await makeWorkspace({
+      Live: { Kept: { '.git': {}, 'a.ts': 'TransactionManager\n' } },
+      Archived: { Dropped: { '.git': {}, 'b.ts': 'TransactionManager\n' } }
+    });
+    const cfg: LensConfig = { roots: [excludedRoot], exclude: ['Archived/**'], allowWrites: false };
+    const reg = new Registry(cfg);
+    await reg.initialize();
+    excludedClient = await connect(reg, cfg);
+  });
+
+  afterAll(async () => {
+    await excludedClient.close();
+    await cleanup(excludedRoot);
+  });
+
+  it('never reaches a project the config excluded', async () => {
+    const payload = jsonOf<SearchPayload>(
+      await excludedClient.callTool({
+        name: 'search',
+        arguments: { query: 'TransactionManager', scope: 'all' }
+      })
+    );
+    expect(payload.results.map(r => r.project)).toEqual(['Kept']);
+  });
+
+  it('cannot resolve the excluded project by name either', async () => {
+    const result = await excludedClient.callTool({
+      name: 'search',
+      arguments: { query: 'TransactionManager', project: 'Dropped' }
+    });
+    expect(isError(result)).toBe(true);
+    expect(textOf(result)).toMatch(/Project not found/);
+  });
+});
+
 describe('search truncation', () => {
   it('flags truncation when the limit cuts results', async () => {
-    const payload = jsonOf<{ truncated: boolean; matches_found: number }>(
+    const payload = jsonOf<SearchPayload>(
       await client.callTool({
         name: 'search',
         arguments: { query: 'TransactionManager', group: 'Group', limit: 1 }
       })
     );
-    expect(payload.matches_found).toBe(1);
+    expect(payload.hits_returned).toBe(1);
     expect(payload.truncated).toBe(true);
   });
 });

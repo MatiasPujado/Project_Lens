@@ -31,7 +31,7 @@ beforeAll(async () => {
       Gamma_Service: { '.git': {} }
     }
   });
-  registry = new Registry({ roots: [root], exclude: [] });
+  registry = new Registry({ roots: [root], exclude: [], allowWrites: false });
   await registry.initialize();
 });
 
@@ -39,7 +39,7 @@ afterAll(() => cleanup(root));
 
 describe('Registry', () => {
   it('initialize returns scan stats', async () => {
-    const fresh = new Registry({ roots: [root], exclude: [] });
+    const fresh = new Registry({ roots: [root], exclude: [], allowWrites: false });
     const stats = await fresh.initialize();
     expect(stats.projects).toBe(4);
     expect(stats.groups).toBe(2);
@@ -65,8 +65,18 @@ describe('Registry', () => {
     expect(() => registry.resolve('Nope')).toThrow(/not found/);
   });
 
+  it('resolve matches names and qualified keys case-insensitively', () => {
+    expect(registry.resolve('beta').name).toBe('Beta');
+    expect(registry.resolve('groupa/alpha').groupPath).toBe('GroupA');
+  });
+
+  it('resolve suggests the closest names on a miss', () => {
+    expect(() => registry.resolve('Bet')).toThrow(/Closest matches: GroupA\/Beta/);
+    expect(() => registry.resolve('zzz')).toThrow(/Try find_project first/);
+  });
+
   it('revalidate picks up a newly created project via group-dir mtime', async () => {
-    const fresh = new Registry({ roots: [root], exclude: [] });
+    const fresh = new Registry({ roots: [root], exclude: [], allowWrites: false });
     await fresh.initialize();
     await mkdir(path.join(root, 'GroupB', 'NewProj', '.git'), { recursive: true });
     await fresh.revalidate();
@@ -78,7 +88,7 @@ describe('Registry', () => {
       Keep: { Kept: { '.git': {} } },
       Doomed: { Gone: { '.git': {} } }
     });
-    const fresh = new Registry({ roots: [scratch], exclude: [] });
+    const fresh = new Registry({ roots: [scratch], exclude: [], allowWrites: false });
     await fresh.initialize();
     expect(fresh.getAll()).toHaveLength(2);
 
@@ -92,7 +102,7 @@ describe('Registry', () => {
   it('rescans only the stale root when several are configured', async () => {
     const rootA = await makeWorkspace({ GroupA: { A1: { '.git': {} } } });
     const rootB = await makeWorkspace({ GroupB: { B1: { '.git': {} } } });
-    const fresh = new Registry({ roots: [rootA, rootB], exclude: [] });
+    const fresh = new Registry({ roots: [rootA, rootB], exclude: [], allowWrites: false });
     expect((await fresh.initialize()).scanned_roots).toBe(2);
 
     await mkdir(path.join(rootB, 'GroupB', 'B2', '.git'), { recursive: true });
@@ -109,7 +119,7 @@ describe('Registry', () => {
     const warn = vi.spyOn(console, 'error').mockImplementation(() => {});
     unstatable.add(vanished);
     try {
-      const fresh = new Registry({ roots: [scratch], exclude: [] });
+      const fresh = new Registry({ roots: [scratch], exclude: [], allowWrites: false });
       const stats = await fresh.initialize();
       expect(stats.projects).toBe(1);
       expect(warn).toHaveBeenCalledWith(expect.stringContaining(`"${vanished}" vanished`));

@@ -25,6 +25,8 @@ export function sq(value: string): string {
 const vcsDirs = (root: string): string =>
   String.raw`find ${sq(root)} -maxdepth 4 \( -name .git -o -name .svn \) -printf '%h\n'`;
 
+const RG_LINE_CAP = '-M 300 --max-columns-preview';
+
 export function scenarios(f: Fixtures): Scenario[] {
   const { root, project: p } = f;
   const dir = sq(p.absolute_path);
@@ -79,10 +81,16 @@ export function scenarios(f: Fixtures): Scenario[] {
         `head -10 ${file(f.readme)}`
     },
     {
-      id: 'search',
+      id: 'search (project)',
       tool: 'search',
       args: { query: 'TODO', project: p.name, limit: 50 },
-      bash: `rg -n --no-heading TODO ${dir} | head -50`
+      bash: `rg -n --no-heading ${RG_LINE_CAP} TODO ${dir} | head -50`
+    },
+    {
+      id: 'search (scope all)',
+      tool: 'search',
+      args: { query: 'TODO', scope: 'all', limit: 50 },
+      bash: `rg -n --no-heading ${RG_LINE_CAP} TODO ${sq(root)} | head -50`
     },
     {
       id: 'read_file',
