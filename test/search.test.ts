@@ -1,6 +1,9 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Registry } from '../src/registry.js';
-import { excludeGlobArgs, listFiles, parseRgOutput, searchScope } from '../src/search.js';
+import { excludeGlobArgs, listFiles, MAX_FILES, parseRgOutput, searchScope } from '../src/search.js';
 import type { ProjectNode } from '../src/types.js';
 import { cleanup, makeWorkspace } from './helpers.js';
 
@@ -131,7 +134,41 @@ describe('searchScope', () => {
       process.env.PATH = previous;
     }
   });
+
+  it('reports a spawn failure that is not a missing binary', async () => {
+    await withFakeRg('', 0o644, async () => {
+      await expect(searchScope(scope, registry.getAll(), 'x', { limit: LIMIT })).rejects.toThrow(
+        /ripgrep failed: .*EACCES/
+      );
+    });
+  });
+
+  it('falls back to the exit code when a failing ripgrep says nothing', async () => {
+    await withFakeRg('#!/bin/sh\nexit 2\n', 0o755, async () => {
+      await expect(searchScope(scope, registry.getAll(), 'x', { limit: LIMIT })).rejects.toThrow(
+        'ripgrep failed: exit code 2'
+      );
+    });
+  });
 });
+
+/**
+ * A directory holding a hostile `rg`, used as the whole PATH. Reaching searchScope's spawn failure
+ * arms needs ripgrep to misbehave in ways the real binary never does; a shim does that without
+ * mocking node:child_process, so the test still exercises the production spawn path.
+ */
+async function withFakeRg<T>(contents: string, mode: number, fn: () => Promise<T>): Promise<T> {
+  const dir = await mkdtemp(path.join(tmpdir(), 'lens-fakerg-'));
+  await writeFile(path.join(dir, 'rg'), contents, { mode });
+  const previous = process.env.PATH;
+  process.env.PATH = dir;
+  try {
+    return await fn();
+  } finally {
+    process.env.PATH = previous;
+    await rm(dir, { recursive: true, force: true });
+  }
+}
 
 describe('excludeGlobArgs', () => {
   it('anchors a bare directory name so it prunes under absolute scope paths', () => {
@@ -165,6 +202,50 @@ describe('listFiles', () => {
     const { files } = await listFiles(projB, '*.md');
     expect(files).toEqual(['docs/arch.md']);
   });
+
+  it('returns an empty list for a project with no files', async () => {
+    const bare = await makeWorkspace({ Group: { Bare: { '.git': {} } } });
+    const bareRegistry = new Registry({ roots: [bare], exclude: [], allowWrites: false });
+    await bareRegistry.initialize();
+    try {
+      expect(await listFiles(bareRegistry.resolve('Bare'))).toEqual({ files: [], truncated: false });
+    } finally {
+      await cleanup(bare);
+    }
+  });
+
+  it('caps the listing at MAX_FILES and flags the cut', async () => {
+    const names = Object.fromEntries(
+      Array.from({ length: MAX_FILES + 1 }, (_, i) => [`f${String(i).padStart(4, '0')}.ts`, 'x\n'])
+    );
+    const many = await makeWorkspace({ Group: { Many: { '.git': {}, ...names } } });
+    const manyRegistry = new Registry({ roots: [many], exclude: [], allowWrites: false });
+    await manyRegistry.initialize();
+    try {
+      const { files, truncated } = await listFiles(manyRegistry.resolve('Many'));
+      expect(files).toHaveLength(MAX_FILES);
+      expect(truncated).toBe(true);
+      expect(files[0]).toBe('f0000.ts'); // sorted, so the cut is the tail and not an arbitrary slice
+    } finally {
+      await cleanup(many);
+    }
+  });
+
+  it('surfaces a real ripgrep failure rather than reporting no files', async () => {
+    await expect(listFiles(registry.resolve('ProjA'), '[')).rejects.toThrow(/ripgrep failed/);
+  });
+
+  it('explains when ripgrep is not on PATH', async () => {
+    const previous = process.env.PATH;
+    process.env.PATH = '';
+    try {
+      await expect(listFiles(registry.resolve('ProjA'))).rejects.toThrow(
+        /ripgrep \(rg\) is not installed/
+      );
+    } finally {
+      process.env.PATH = previous;
+    }
+  });
 });
 
 describe('parseRgOutput', () => {
@@ -189,6 +270,13 @@ describe('parseRgOutput', () => {
 
   it('skips malformed lines instead of aborting the whole search', () => {
     const stdout = ['not json at all', match('/w/Group/ProjA/main.ts')].join('\n');
+    expect(parseRgOutput(stdout, [project], LIMIT).files).toEqual([
+      { project: 'ProjA', file: 'main.ts', lines: [[1, 'hit']] }
+    ]);
+  });
+
+  it('skips blank lines, including the trailing one every stream ends with', () => {
+    const stdout = ['', match('/w/Group/ProjA/main.ts'), '', ''].join('\n');
     expect(parseRgOutput(stdout, [project], LIMIT).files).toEqual([
       { project: 'ProjA', file: 'main.ts', lines: [[1, 'hit']] }
     ]);
@@ -243,6 +331,15 @@ describe('parseRgOutput', () => {
     const { files, hitsReturned } = parseRgOutput(stdout, [project], LIMIT, 1);
     expect(hitsReturned).toBe(1);
     expect(files[0]!.lines).toEqual([[2, 'before\nhit\nafter']]);
+  });
+
+  it('folds only the context that exists when the match sits at the file edge', () => {
+    const stdout = [
+      match('/w/Group/ProjA/main.ts', 1, 'hit\n'),
+      event('context', '/w/Group/ProjA/main.ts', 2, 'after\n')
+    ].join('\n');
+    const { files } = parseRgOutput(stdout, [project], LIMIT, 2);
+    expect(files[0]!.lines).toEqual([[1, 'hit\nafter']]);
   });
 
   it('caps hits at the limit and flags the cut', () => {

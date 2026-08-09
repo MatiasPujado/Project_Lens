@@ -191,6 +191,11 @@ describe('per-root .project-lens.json', () => {
     expect(() => resolveConfig(undefined, { PROJECT_LENS_PATH: dir })).toThrow(/not valid JSON/);
   });
 
+  it('fails loudly when the workspace file parses but is not a valid config', async () => {
+    const dir = await makeRoot({ exclude: 'Archived/**' });
+    expect(() => resolveConfig(undefined, { PROJECT_LENS_PATH: dir })).toThrow(/is invalid/);
+  });
+
   it('is optional', async () => {
     const dir = await makeRoot();
     const config = resolveConfig(undefined, { PROJECT_LENS_PATH: dir });
