@@ -12,4 +12,6 @@ export interface ProjectNode {
 export interface LensConfig {
   roots: string[];
   exclude: string[];
+  rootExclude?: Record<string, string[]>;
+  allowWrites: boolean;
 }

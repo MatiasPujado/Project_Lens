@@ -14,7 +14,8 @@ export async function connect(name: string): Promise<Client> {
       env: {
         ...getDefaultEnvironment(),
         ...(process.env.PROJECTS_MCP_CONFIG ? { PROJECTS_MCP_CONFIG: process.env.PROJECTS_MCP_CONFIG } : {}),
-        ...(process.env.PROJECT_LENS_PATH ? { PROJECT_LENS_PATH: process.env.PROJECT_LENS_PATH } : {})
+        ...(process.env.PROJECT_LENS_PATH ? { PROJECT_LENS_PATH: process.env.PROJECT_LENS_PATH } : {}),
+        PROJECT_LENS_ALLOW_WRITES: '1' // the write_file scenario needs the write tools registered
       }
     })
   );
@@ -49,11 +50,18 @@ export function column(table: ProjectTable, field: string): (row: unknown[]) => 
 
 export async function anyProject(client: Client): Promise<BenchProject> {
   const table = JSON.parse(await callText(client, 'list_projects', {})) as ProjectTable;
-  const first = table.rows[0];
-  if (first === undefined) throw new Error('no projects in registry; check config');
-  return {
-    name: column(table, 'name')(first),
-    group: column(table, 'group')(first),
-    absolute_path: column(table, 'absolute_path')(first)
-  };
+  const name = column(table, 'name');
+  const group = column(table, 'group');
+  const pinned = process.env.LENS_BENCH_PROJECT;
+  const row = pinned
+    ? table.rows.find(r => name(r) === pinned || `${group(r)}/${name(r)}` === pinned)
+    : table.rows[0];
+  if (row === undefined) {
+    throw new Error(
+      pinned
+        ? `LENS_BENCH_PROJECT="${pinned}" matches no project in the registry`
+        : 'no projects in registry; check config'
+    );
+  }
+  return { name: name(row), group: group(row), absolute_path: column(table, 'absolute_path')(row) };
 }

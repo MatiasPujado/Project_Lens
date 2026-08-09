@@ -23,7 +23,7 @@ beforeAll(async () => {
     },
     Experiments: { FlatProj: { '.git': {}, 'package.json': '{}' } }
   });
-  const config = { roots: [root], exclude: [] };
+  const config = { roots: [root], exclude: [], allowWrites: true };
   const registry = new Registry(config);
   await registry.initialize();
   const server = buildServer(registry, config);
@@ -40,7 +40,7 @@ afterAll(async () => {
 });
 
 describe('Project-Lens over MCP', () => {
-  it('exposes exactly the 11 spec tools', async () => {
+  it('exposes exactly the 11 spec tools when writes are allowed', async () => {
     const { tools } = await client.listTools();
     expect(tools.map(t => t.name).sort()).toEqual([
       'find_project',
@@ -55,6 +55,37 @@ describe('Project-Lens over MCP', () => {
       'search',
       'write_file'
     ]);
+  });
+
+  it('hides the write tools entirely when writes are off', async () => {
+    const config = { roots: [root], exclude: [], allowWrites: false };
+    const registry = new Registry(config);
+    await registry.initialize();
+    const server = buildServer(registry, config);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    const readOnly = new Client({ name: 'lens-test-ro', version: '0.0.0' });
+    await readOnly.connect(clientTransport);
+    try {
+      const names = (await readOnly.listTools()).tools.map(t => t.name);
+      expect(names).toHaveLength(9);
+      expect(names).not.toContain('write_file');
+      expect(names).not.toContain('scaffold_project');
+    } finally {
+      await readOnly.close();
+    }
+  });
+
+  it('describes every input parameter of every tool', async () => {
+    const { tools } = await client.listTools();
+    const undocumented: string[] = [];
+    for (const tool of tools) {
+      const properties = (tool.inputSchema.properties ?? {}) as Record<string, { description?: string }>;
+      for (const [param, schema] of Object.entries(properties)) {
+        if (!schema.description) undocumented.push(`${tool.name}.${param}`);
+      }
+    }
+    expect(undocumented).toEqual([]);
   });
 
   it('map_workspace returns the group -> project map', async () => {
