@@ -9,10 +9,10 @@ export const MODEL = process.env.LENS_BENCH_MODEL ?? 'claude-opus-5';
 /**
  * `api` is the real measurement: Anthropic's count_tokens endpoint for the pinned model.
  * `messages` is the equally real measurement available to OAuth (Claude plan) credentials, which
- * count_tokens rejects outright — "jwt auth is not yet supported on count_tokens". It sends the
+ * count_tokens rejects outright (jwt auth is not yet supported on count_tokens). It sends the
  * text through /v1/messages with max_tokens 1 and reads usage.input_tokens, so it is the same
  * tokenizer at the price of plan quota.
- * `bytes` is a deliberately degraded fallback for machines with no credentials at all — it counts
+ * `bytes` is a deliberately degraded fallback for machines with no credentials at all. It counts
  * UTF-8 bytes, which is a usable proxy for MCP-vs-bash *ratios* but is not a token count and is
  * never silently substituted: it must be asked for, and every report it produces says so.
  */
@@ -113,6 +113,16 @@ export async function countTokens(text: string): Promise<number> {
   if (COUNTER === 'bytes') return Buffer.byteLength(text, 'utf8');
   const [total, overhead] = await Promise.all([raw(text), framingOverhead()]);
   return total - overhead;
+}
+
+/**
+ * The recovered constant, for the report to print. Every count is this much smaller than what the
+ * endpoint returned, and a row is measured as two counts per side; so on a row of a few dozen
+ * tokens an error of one here is already a percent of the ratio. Printing it makes that auditable
+ * across runs instead of invisible.
+ */
+export async function framingTokens(): Promise<number | null> {
+  return COUNTER === 'bytes' ? null : framingOverhead();
 }
 
 export function flushCache(): void {
