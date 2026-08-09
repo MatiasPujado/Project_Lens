@@ -28,7 +28,7 @@ describe('main', () => {
     );
     expect(serveStdio).toHaveBeenCalledOnce();
 
-    const factory = vi.mocked(serveStdio).mock.calls[0]![0] as () => { registerTool: unknown };
+    const factory = vi.mocked(serveStdio).mock.calls[0]![0] as unknown as () => { registerTool: unknown };
     expect(factory()).toHaveProperty('registerTool');
   });
 

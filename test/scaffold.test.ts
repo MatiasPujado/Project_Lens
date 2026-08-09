@@ -12,7 +12,7 @@ beforeAll(async () => {
   root = await makeWorkspace({
     Experiments: { Existing: { '.git': {} } }
   });
-  registry = new Registry({ roots: [root], exclude: [] });
+  registry = new Registry({ roots: [root], exclude: [], allowWrites: false });
   await registry.initialize();
 });
 
