@@ -1,4 +1,4 @@
-import { chmod } from 'node:fs/promises';
+import { chmod, readFile, stat, symlink } from 'node:fs/promises';
 import path from 'node:path';
 import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -34,7 +34,7 @@ beforeAll(async () => {
   root = await makeWorkspace({
     Group: {
       ProjA: {
-        '.git': {},
+        '.git': { config: '[remote "origin"]\n\turl = https://u:FAKETOKEN@example.invalid/r.git\n' },
         'README.md': '# ProjA\n',
         'main.ts': 'export class TransactionManager {}\n',
         'lines.txt': 'l1\nl2\nl3\nl4\n',
@@ -193,6 +193,15 @@ describe('search', () => {
     expect(inside.results.every(r => r.file.startsWith('docs/'))).toBe(true);
   });
 
+  it('refuses a path_prefix inside .git', async () => {
+    const result = await client.callTool({
+      name: 'search',
+      arguments: { query: 'FAKETOKEN', project: 'ProjA', path_prefix: '.git' }
+    });
+    expect(isError(result)).toBe(true);
+    expect(textOf(result)).not.toContain('FAKETOKEN@');
+  });
+
   it('rejects a path_prefix that escapes the project root', async () => {
     const result = await client.callTool({
       name: 'search',
@@ -329,13 +338,22 @@ describe('project_info', () => {
 });
 
 describe('read_file', () => {
+  it('refuses a file inside .git', async () => {
+    const result = await client.callTool({
+      name: 'read_file',
+      arguments: { project: 'ProjA', relative_path: '.git/config' }
+    });
+    expect(isError(result)).toBe(true);
+    expect(textOf(result)).not.toContain('FAKETOKEN');
+  });
+
   it('refuses secret-pattern files that search and list_files already hide', async () => {
     const result = await client.callTool({
       name: 'read_file',
       arguments: { project: 'ProjA', relative_path: '.env' }
     });
     expect(isError(result)).toBe(true);
-    expect(textOf(result)).toMatch(/Refusing to read a secret-pattern file/);
+    expect(textOf(result)).toMatch(/Access forbidden \(.git or secret-pattern file\)/);
     expect(textOf(result)).not.toContain('s3cret');
   });
 
@@ -462,5 +480,31 @@ describe('search truncation', () => {
     );
     expect(payload.hits_returned).toBe(1);
     expect(payload.truncated).toBe(true);
+  });
+});
+
+describe('write_file and symbolic links', () => {
+  it('refuses a dangling link that points outside the project, and creates nothing there', async () => {
+    const outsideTarget = path.join(root, 'outside-target.txt');
+    await symlink(outsideTarget, path.join(root, 'Group', 'ProjA', 'dangling'));
+    const result = await client.callTool({
+      name: 'write_file',
+      arguments: { project: 'ProjA', relative_path: 'dangling', content: 'x' }
+    });
+    expect(isError(result)).toBe(true);
+    await expect(stat(outsideTarget)).rejects.toThrow(/ENOENT/);
+  });
+
+  it('refuses a link to an existing file inside the project, and leaves that file unchanged', async () => {
+    const target = path.join(root, 'Group', 'ProjA', 'src', 'a.ts');
+    const before = await readFile(target, 'utf8');
+    await symlink(target, path.join(root, 'Group', 'ProjA', 'inside-link'));
+    const result = await client.callTool({
+      name: 'write_file',
+      arguments: { project: 'ProjA', relative_path: 'inside-link', content: 'y\n' }
+    });
+    expect(isError(result)).toBe(true);
+    expect(textOf(result)).toMatch(/symbolic link/);
+    await expect(readFile(target, 'utf8')).resolves.toBe(before);
   });
 });

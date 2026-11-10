@@ -1,7 +1,7 @@
 import { execFile, spawn } from 'node:child_process';
 import path from 'node:path';
 import readline from 'node:readline';
-import { isSecretFile } from './security.js';
+import { isForbiddenPath } from './security.js';
 import type { ProjectNode } from './types.js';
 
 /** Hits for one file: [line number, excerpt] pairs, positional to keep responses small. */
@@ -27,9 +27,12 @@ export interface SearchOptions {
 export const MAX_FILES = 500;
 const MAX_EXCERPT_CHARS = 300;
 
+/** A user's ripgreprc could hide files or change the output format, so the server never reads one. */
+const RG_BASE_ARGS = ['--no-config'];
+
 function runRg(args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile('rg', args, { maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
+    execFile('rg', [...RG_BASE_ARGS, ...args], { maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
       if (err && (err as NodeJS.ErrnoException).code === 'ENOENT') {
         reject(new Error('ripgrep (rg) is not installed or not on PATH; the search tool requires it'));
       } else if (err && (err as { code?: unknown }).code === 1) {
@@ -106,7 +109,8 @@ class HitCollector {
 
   private record(event: RgEvent): void {
     const file = event.data.path.text;
-    if (!file || isSecretFile(file) || !this.ownerOf(file)) return;
+    const owner = file ? this.ownerOf(file) : undefined;
+    if (!file || !owner || isForbiddenPath(path.relative(owner.absolutePath, file))) return;
     if (this.truncated) this.eventsSinceLimit++;
 
     let lines = this.texts.get(file);
@@ -169,7 +173,7 @@ export async function searchScope(
 ): Promise<SearchResult> {
   if (scopeDirs.length === 0) return { files: [], hitsReturned: 0, truncated: false };
   const contextLines = opts.contextLines ?? 0;
-  const args = ['--json', '-e', query];
+  const args = [...RG_BASE_ARGS, '--json', '-e', query];
   if (opts.glob) args.push('-g', opts.glob);
   args.push(...excludeGlobArgs(opts.exclude));
   if (contextLines) args.push('-C', String(contextLines));
@@ -228,8 +232,9 @@ export async function listFiles(
   const stdout = await runRg(args);
   const files = stdout
     .split('\n')
-    .filter(f => f !== '' && !isSecretFile(f))
+    .filter(f => f !== '')
     .map(f => path.relative(project.absolutePath, f))
+    .filter(f => !isForbiddenPath(f))
     .sort();
   return { files: files.slice(0, MAX_FILES), truncated: files.length > MAX_FILES };
 }

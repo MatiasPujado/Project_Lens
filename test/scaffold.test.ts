@@ -1,4 +1,5 @@
-import { readFile, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, stat, symlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Registry } from '../src/registry.js';
@@ -27,6 +28,30 @@ describe('scaffoldProject', () => {
 
   it('rejects unknown groups', async () => {
     await expect(scaffoldProject(registry, [root], 'NoSuchGroup', 'X')).rejects.toThrow(/does not exist/);
+  });
+
+  it('refuses a group directory that is a symbolic link leaving the root, and creates nothing', async () => {
+    const outside = await makeWorkspace({});
+    await symlink(outside, path.join(root, 'Escape'));
+    try {
+      await expect(scaffoldProject(registry, [root], 'Escape', 'X')).rejects.toThrow(/leaves the root/);
+      await expect(stat(path.join(outside, 'X'))).rejects.toThrow(/ENOENT/);
+    } finally {
+      await cleanup(outside);
+    }
+  });
+
+  it('removes the new directory when git init fails, so a retry is not blocked', async () => {
+    const emptyPath = await mkdtemp(path.join(tmpdir(), 'lens-nogit-'));
+    const savedPath = process.env.PATH;
+    process.env.PATH = emptyPath;
+    try {
+      await expect(scaffoldProject(registry, [root], 'Experiments', 'No_Git')).rejects.toThrow();
+    } finally {
+      process.env.PATH = savedPath;
+      await cleanup(emptyPath);
+    }
+    await expect(stat(path.join(root, 'Experiments', 'No_Git'))).rejects.toThrow(/ENOENT/);
   });
 
   it('refuses existing targets', async () => {
