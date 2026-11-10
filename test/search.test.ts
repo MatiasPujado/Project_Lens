@@ -19,7 +19,8 @@ beforeAll(async () => {
       ProjA: {
         '.git': {},
         'main.ts': 'export class TransactionManager {}\n',
-        '.env': 'TransactionManager=secret\n'
+        '.env': 'TransactionManager=secret\n',
+        'server.key': 'TransactionManager=secret\n'
       },
       ProjB: {
         '.git': {},
@@ -310,6 +311,12 @@ describe('parseRgOutput', () => {
     expect(files[0]!.lines[0]![1]).toHaveLength(300);
   });
 
+  it('drops hits inside .git, even where ripgrep reports them', () => {
+    const stdout = [match('/w/Group/ProjA/.git/config'), match('/w/Group/ProjA/main.ts')].join('\n');
+    const { files } = parseRgOutput(stdout, [project], LIMIT);
+    expect(files.map(f => f.file)).toEqual(['main.ts']);
+  });
+
   it('groups every hit in a file under one entry', () => {
     const stdout = [
       match('/w/Group/ProjA/main.ts', 1),
@@ -353,5 +360,44 @@ describe('parseRgOutput', () => {
     const uncapped = parseRgOutput(stdout, [project], 200);
     expect(uncapped.hitsReturned).toBe(150);
     expect(uncapped.truncated).toBe(false);
+  });
+});
+
+describe('listFiles access policy', () => {
+  it('drops a secret-pattern file ripgrep lists because it is not hidden', async () => {
+    const { files } = await listFiles(registry.resolve('ProjA'));
+    expect(files).toContain('main.ts');
+    expect(files).not.toContain('server.key');
+  });
+});
+
+describe('listFiles .git policy', () => {
+  it('drops a path inside .git, even where ripgrep lists one', async () => {
+    const projA = registry.resolve('ProjA');
+    const script = `#!/bin/sh\necho '${projA.absolutePath}/.git/config'\necho '${projA.absolutePath}/main.ts'\n`;
+    const { files } = await withFakeRg(script, 0o755, () => listFiles(projA));
+    expect(files).toEqual(['main.ts']);
+  });
+});
+
+describe('ripgrep user configuration', () => {
+  it('is ignored by search and list_files', async () => {
+    const configFile = path.join(root, 'hostile.ripgreprc');
+    await writeFile(configFile, '--glob=!*.ts\n--glob=!*.md\n');
+    const saved = process.env.RIPGREP_CONFIG_PATH;
+    process.env.RIPGREP_CONFIG_PATH = configFile;
+    try {
+      const projA = registry.resolve('ProjA');
+      expect((await listFiles(projA)).files).toContain('main.ts');
+      const result = await searchScope(scope, registry.getAll(), 'TransactionManager', { limit: LIMIT });
+      const files = flatten(result.files).map(h => h.file);
+      expect(files).toHaveLength(2);
+      expect(files).toEqual(
+        expect.arrayContaining([expect.stringContaining('arch.md'), expect.stringContaining('main.ts')])
+      );
+    } finally {
+      if (saved === undefined) delete process.env.RIPGREP_CONFIG_PATH;
+      else process.env.RIPGREP_CONFIG_PATH = saved;
+    }
   });
 });

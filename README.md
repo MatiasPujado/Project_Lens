@@ -124,14 +124,39 @@ lines costs the same as one matching fifty.
 
 - **Path traversal is rejected** on every tool that takes a relative path `../`, absolute paths and symlinks pointing
   outside the resolved project root.
-- **Secret-pattern files are invisible.** `.env*`, `*.pem`, `id_rsa*` and `*credentials*` never appear in key files,
-  listings, search results or `read_file` output.
+- **Secret-pattern files and `.git` are invisible.** `.env*`, `*credentials*`, `.npmrc`, `.netrc`, `.pgpass`,
+  `.htpasswd`, SSH keys (`id_rsa*`, `id_ed25519*`, `id_ecdsa*`, `id_dsa*`), and key or certificate stores (`*.pem`,
+  `*.key`, `*.p12`, `*.pfx`, `*.jks`, `*.keystore`, `*.kdbx`) never appear in key files, listings, search results or
+  `read_file` output, and `write_file` refuses them. No path with a `.git` segment can be read, searched or written.
 - **Remote URLs are sanitised.** `project_info` strips userinfo (`user:token@`) from git remotes before returning them.
 - **Writes are unregistered, not merely refused,** unless explicitly enabled a client that connects without them cannot
   call them at all.
 - **Untrusted config cannot widen scope.** A per-root `.project-lens.json` may only set `exclude`; a cloned repository
   cannot switch writes on or add roots.
 - **Failures are loud.** Malformed configuration aborts startup rather than running with a silently changed scope.
+- **Writes never go through a symbolic link** in the last path component, wherever it points: `write_file` refuses it,
+  and opens the file with `O_NOFOLLOW` so none can be swapped in afterwards. A platform without `O_NOFOLLOW` (Windows)
+  refuses every write rather than lose that protection.
+- **A repository's own configuration runs nothing.** The git commands behind `project_info` and `list_projects` run with
+  `core.fsmonitor` off, every clean, smudge and process filter the repository's own config defines blanked, and
+  submodules ignored; ripgrep starts with `--no-config`. Filters from your global or system config, such as git-lfs,
+  keep working. `is_clean` reports the repository's own files, not changes inside its submodules.
+
+**What the server does not protect against.** Project-Lens bounds _where_ an agent can read and write. It does not judge
+_what_ it reads, and it runs with your user's permissions.
+
+- **Prompt injection.** Everything a tool returns — the README lines in `project_info`'s `readme_snippet`, file
+  contents, search excerpts — is text from the workspace, which may come from a repository someone else wrote. An agent
+  can read instructions planted there and follow them.
+- **Enabling writes widens what injected text can do.** With `allow_writes` on, an agent can write any non-secret file
+  outside `.git`: source code, build scripts, CI files. Those run later, through your own tools, outside this server's
+  control. Turn writes on only for workspaces whose contents you trust, and review what the agent writes.
+- **It is not a sandbox.** The server does not isolate the agent from the rest of your machine; it only refuses paths
+  outside the projects it registered. Other tools the agent has are not affected.
+- **A workspace another OS user can write to is out of scope.** Between checking a path and opening it, a folder in the
+  middle of the path could be swapped for a symbolic link. Only a process writing in the workspace at that moment can do
+  it, and one running as your own user already has your permissions, so this matters only when another OS user can write
+  to a root. Keep your roots writable by you alone.
 
 </details>
 

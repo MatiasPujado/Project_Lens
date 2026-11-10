@@ -1,4 +1,4 @@
-import { readdir, readFile as fsReadFile, mkdir, writeFile as fsWriteFile } from 'node:fs/promises';
+import { readdir, readFile as fsReadFile, mkdir, open } from 'node:fs/promises';
 import path from 'node:path';
 import { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
@@ -6,7 +6,7 @@ import { vcsInfo } from './git.js';
 import { byName, projectKey, type Registry } from './registry.js';
 import { scaffoldProject } from './scaffold.js';
 import { listFiles, searchScope } from './search.js';
-import { isSecretFile, resolveWithin } from './security.js';
+import { noFollowWriteFlags, resolveWithin } from './security.js';
 import type { LensConfig, ProjectNode } from './types.js';
 
 const MAX_READ_CHARS = 500_000;
@@ -75,7 +75,7 @@ async function scopeDirsFor(scoped: ProjectNode[], pathPrefix?: string): Promise
 }
 
 export function buildServer(registry: Registry, config: LensConfig): McpServer {
-  const server = new McpServer({ name: 'project-lens', version: '0.3.0' });
+  const server = new McpServer({ name: 'project-lens', version: '0.4.0' });
 
   server.registerTool(
     'map_workspace',
@@ -282,7 +282,7 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
       description:
         'Read a file inside a registered project. Paths escaping the project root are rejected — ' +
         'absolute paths, ../ traversal and symlinks pointing outside all fail. ' +
-        'Secret-pattern files (.env*, *.pem, id_rsa*, *credentials*) are never returned.',
+        'Paths inside .git and secret-pattern files (.env*, keys, certificates, credential stores) are never returned.',
       inputSchema: z.object({
         project: projectKeyArg,
         relative_path: z.string().min(1).describe('Path relative to project root. Escapes rejected.'),
@@ -293,9 +293,6 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
     guarded(async ({ project, relative_path, offset, limit }) => {
       const node = registry.resolve(project);
       const resolved = await resolveWithin(node.absolutePath, relative_path);
-      if (isSecretFile(resolved)) {
-        throw new Error(`Refusing to read a secret-pattern file: ${relative_path}`);
-      }
       let content = await fsReadFile(resolved, 'utf8');
       if (offset !== undefined || limit !== undefined) {
         const start = (offset ?? 1) - 1;
@@ -342,6 +339,19 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
   return server;
 }
 
+/**
+ * resolveWithin already refused a link in the last component; O_NOFOLLOW makes the kernel refuse one at open
+ * time too, so nothing can swap a link in between that check and the write.
+ */
+async function writeNoFollow(file: string, content: string, flags: number): Promise<void> {
+  const handle = await open(file, flags, 0o666);
+  try {
+    await handle.writeFile(content, 'utf8');
+  } finally {
+    await handle.close();
+  }
+}
+
 /** Registered only when allow_writes is on: everything here mutates the workspace. */
 function registerWriteTools(server: McpServer, registry: Registry, config: LensConfig): void {
   server.registerTool(
@@ -349,7 +359,9 @@ function registerWriteTools(server: McpServer, registry: Registry, config: LensC
     {
       description:
         'Write a file inside a registered project. Paths escaping the project root are rejected — ' +
-        'absolute paths, ../ traversal and symlinks pointing outside all fail.',
+        'absolute paths, ../ traversal and symlinks pointing outside all fail. Also refused: any path inside .git, ' +
+        'secret-pattern names (.env*, keys, certificates, credential stores), a symbolic link as the last path ' +
+        'component, and every write on a platform without O_NOFOLLOW (Windows).',
       inputSchema: z.object({
         project: projectKeyArg,
         relative_path: z.string().min(1)
@@ -360,8 +372,9 @@ function registerWriteTools(server: McpServer, registry: Registry, config: LensC
     guarded(async ({ project, relative_path, content }) => {
       const node = registry.resolve(project);
       const resolved = await resolveWithin(node.absolutePath, relative_path, { forWrite: true });
+      const flags = noFollowWriteFlags(); // before mkdir, so a refused platform creates nothing
       await mkdir(path.dirname(resolved), { recursive: true });
-      await fsWriteFile(resolved, content, 'utf8');
+      await writeNoFollow(resolved, content, flags);
       return json({
         project: node.name,
         relative_path,

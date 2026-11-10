@@ -1,8 +1,8 @@
 import { execFile } from 'node:child_process';
-import { mkdir, stat, writeFile } from 'node:fs/promises';
+import { mkdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { validateName } from './security.js';
+import { validateName, within } from './security.js';
 import type { Registry } from './registry.js';
 import type { ProjectNode } from './types.js';
 
@@ -47,12 +47,18 @@ export async function scaffoldProject(
     const candidate = path.join(root, ...segments);
     try {
       if ((await stat(candidate)).isDirectory()) {
+        const realRoot = await realpath(root);
+        if (!within(await realpath(candidate), realRoot)) {
+          throw new Error(`Group "${group}" is a symbolic link that leaves the root ${root}`);
+        }
         groupDir = candidate;
         owningRoot = root;
         break;
       }
-    } catch {
-      console.error(`Group "${group}" does not exist under root ${root}`);
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (!code) throw e;
+      console.error(`Group "${group}" is not usable under root ${root} (${code})`);
     }
   }
   if (!groupDir || !owningRoot) {
@@ -68,7 +74,12 @@ export async function scaffoldProject(
   }
 
   await mkdir(target);
-  await run('git', ['init'], { cwd: target, timeout: 10000 });
+  try {
+    await run('git', ['init'], { cwd: target, timeout: 10000 });
+  } catch (e) {
+    await rm(target, { recursive: true, force: true });
+    throw e;
+  }
   if (opts.readme) await writeFile(path.join(target, 'README.md'), `# ${name}\n`);
   if (opts.gitignore) await writeFile(path.join(target, '.gitignore'), GITIGNORE_STUB);
 
