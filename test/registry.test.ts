@@ -149,6 +149,46 @@ describe('Registry', () => {
     }
   });
 
+  it('find ignores spaces, underscores, dashes and dots, ranking matches as written first', async () => {
+    const scratch = await makeWorkspace({
+      Main: { Project_Lens: { '.git': {} } },
+      Lab: { ProjectLens: { '.git': {} }, 'project.lens.old': { '.git': {} }, Old_Project_Lens: { '.git': {} } }
+    });
+    try {
+      const fresh = new Registry({ roots: [scratch], exclude: [], allowWrites: false });
+      await fresh.initialize();
+      expect(fresh.find('project lens').map(n => n.name).sort()).toEqual(
+        ['Old_Project_Lens', 'ProjectLens', 'Project_Lens', 'project.lens.old'].sort()
+      );
+      // exact, then prefix, then substring, once separators are ignored; the two exact ones tie and sort by name
+      expect(fresh.find('project lens').map(n => n.name)).toEqual([
+        'Project_Lens',
+        'ProjectLens',
+        'project.lens.old',
+        'Old_Project_Lens'
+      ]);
+      expect(fresh.find('Project_Lens')[0]!.name).toBe('Project_Lens');
+      expect(fresh.find('projectlens')[0]!.name).toBe('ProjectLens');
+      expect(fresh.find('ject lens').map(n => n.name)).toContain('Project_Lens');
+      expect(fresh.find('_-. ')).toEqual([]);
+      expect(() => fresh.resolve('project lens')).toThrow(/not found/);
+    } finally {
+      await cleanup(scratch);
+    }
+  });
+
+  it('find returns every match; callers apply their own cap', async () => {
+    const many = Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`Svc${i}`, { '.git': {} }]));
+    const scratch = await makeWorkspace({ Group: many });
+    try {
+      const fresh = new Registry({ roots: [scratch], exclude: [], allowWrites: false });
+      await fresh.initialize();
+      expect(fresh.find('svc')).toHaveLength(12);
+    } finally {
+      await cleanup(scratch);
+    }
+  });
+
   it('find matches a substring in the middle of a name', () => {
     expect(registry.find('service').map(n => n.name)).toEqual(['Gamma_Service']);
   });

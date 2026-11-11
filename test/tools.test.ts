@@ -1,11 +1,24 @@
 import { chmod, mkdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { Registry } from '../src/registry.js';
-import { buildServer } from '../src/tools.js';
+import { buildServer, readLines } from '../src/tools.js';
 import type { LensConfig } from '../src/types.js';
 import { cleanup, isError, jsonOf, makeWorkspace, notRoot, textOf } from './helpers.js';
+
+const spawnSignals = vi.hoisted(() => [] as Array<AbortSignal | undefined>);
+
+vi.mock('node:child_process', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    spawn: (command: string, args: string[], options?: { signal?: AbortSignal }) => {
+      if (command === 'rg') spawnSignals.push(options?.signal);
+      return actual.spawn(command, args, options ?? {});
+    }
+  };
+});
 
 const BIG_FILE_CHARS = 600_000;
 
@@ -151,6 +164,28 @@ describe('list_projects', () => {
     expect(projects.find(p => p.name === 'ProjA')!.vcs_type).toBe('git');
   });
 
+  it('matches a group ignoring letter case', async () => {
+    const table = jsonOf<Table>(await client.callTool({ name: 'list_projects', arguments: { group: 'group' } }));
+    expect(objects(table).map(p => p.name)).toEqual(['ProjA', 'ProjB', 'SvnProj']);
+  });
+
+  it('rejects an unknown group, as search does', async () => {
+    const result = await client.callTool({ name: 'list_projects', arguments: { group: 'NoSuch' } });
+    expect(isError(result)).toBe(true);
+    expect(textOf(result)).toMatch(/Unknown group: "NoSuch"/);
+  });
+
+  it('sorts with the pinned locale', async () => {
+    const compare = vi.spyOn(String.prototype, 'localeCompare');
+    try {
+      await client.callTool({ name: 'list_projects', arguments: {} });
+      expect(compare.mock.calls.length).toBeGreaterThan(0);
+      expect(compare.mock.calls.every(call => call[1] === 'en')).toBe(true);
+    } finally {
+      compare.mockRestore();
+    }
+  });
+
   it('include of stack alone runs no vcs queries and omits vcs_type', async () => {
     const table = jsonOf<Table>(
       await client.callTool({ name: 'list_projects', arguments: { group: 'Group', include: ['stack'] } })
@@ -236,6 +271,50 @@ describe('search', () => {
       })
     );
     expect(payload.results[0]!.lines[0]![1]).toContain('TransactionManager');
+  });
+
+  it('fixed_strings matches regex metacharacters literally', async () => {
+    const asRegex = await client.callTool({
+      name: 'search',
+      arguments: { query: 'TransactionManager {', project: 'ProjA' }
+    });
+    expect(isError(asRegex)).toBe(true);
+    const literal = jsonOf<SearchPayload>(
+      await client.callTool({
+        name: 'search',
+        arguments: { query: 'TransactionManager {', project: 'ProjA', fixed_strings: true }
+      })
+    );
+    expect(literal.results.map(r => r.file)).toEqual(['main.ts']);
+  });
+
+  it('ignore_case matches regardless of case', async () => {
+    const exact = jsonOf<SearchPayload>(
+      await client.callTool({ name: 'search', arguments: { query: 'transactionmanager', project: 'ProjA' } })
+    );
+    expect(exact.results).toEqual([]);
+    const folded = jsonOf<SearchPayload>(
+      await client.callTool({
+        name: 'search',
+        arguments: { query: 'transactionmanager', project: 'ProjA', ignore_case: true }
+      })
+    );
+    expect(folded.results.map(r => r.file)).toEqual(['main.ts']);
+  });
+
+  it('matches a group ignoring letter case', async () => {
+    const payload = jsonOf<SearchPayload>(
+      await client.callTool({ name: 'search', arguments: { query: 'TransactionManager', group: 'group' } })
+    );
+    expect([...new Set(payload.results.map(r => r.project))].sort()).toEqual(['ProjA', 'ProjB']);
+  });
+
+  it('hands ripgrep the request signal, so a cancelled call stops it', async () => {
+    spawnSignals.length = 0;
+    await client.callTool({ name: 'search', arguments: { query: 'TransactionManager', project: 'ProjA' } });
+    await client.callTool({ name: 'list_files', arguments: { project: 'ProjA' } });
+    expect(spawnSignals).toHaveLength(2);
+    expect(spawnSignals.every(signal => signal instanceof AbortSignal)).toBe(true);
   });
 
   it('rejects an unknown group', async () => {
@@ -362,8 +441,41 @@ describe('read_file', () => {
         arguments: { project: 'ProjB', relative_path: 'big.txt' }
       })
     );
-    expect(content).toMatch(/\n\[truncated at 500000 chars\]$/);
-    expect(content.length).toBeLessThan(BIG_FILE_CHARS);
+    expect(content).toBe(`${'a'.repeat(500_000)}\n[truncated at 500000 chars in line 1 of 1]`);
+  });
+
+  it('returns a whole file exactly, with no footer', async () => {
+    const content = textOf(
+      await client.callTool({ name: 'read_file', arguments: { project: 'ProjA', relative_path: 'lines.txt' } })
+    );
+    expect(content).toBe('l1\nl2\nl3\nl4\n');
+  });
+
+  it('cuts at the read cap on a line boundary and names the line it stopped in', async () => {
+    const line = 'b'.repeat(200_000);
+    await writeFile(path.join(root, 'Group', 'ProjB', 'lines-big.txt'), `${line}\n${line}\n${line}\n${line}\n`);
+    const content = textOf(
+      await client.callTool({ name: 'read_file', arguments: { project: 'ProjB', relative_path: 'lines-big.txt' } })
+    );
+    expect(content).toBe(`${line}\n${line}\n${'b'.repeat(99_998)}\n[truncated at 500000 chars in line 3 of 4]`);
+  });
+
+  it('says when the offset is past the last line', async () => {
+    const content = textOf(
+      await client.callTool({
+        name: 'read_file',
+        arguments: { project: 'ProjA', relative_path: 'lines.txt', offset: 9 }
+      })
+    );
+    expect(content).toBe('[offset 9 is past the last line, 4]');
+  });
+
+  it('returns an empty file as empty text', async () => {
+    await writeFile(path.join(root, 'Solo', 'empty.txt'), '');
+    const content = textOf(
+      await client.callTool({ name: 'read_file', arguments: { project: 'Solo', relative_path: 'empty.txt' } })
+    );
+    expect(content).toBe('');
   });
 
   it('pages with offset and limit', async () => {
@@ -373,7 +485,7 @@ describe('read_file', () => {
         arguments: { project: 'ProjA', relative_path: 'lines.txt', offset: 2, limit: 2 }
       })
     );
-    expect(content).toBe('l2\nl3');
+    expect(content).toBe('l2\nl3\n[lines 2-3 of 4]');
   });
 
   it('reads from the first line when only limit is given', async () => {
@@ -383,7 +495,7 @@ describe('read_file', () => {
         arguments: { project: 'ProjA', relative_path: 'lines.txt', limit: 1 }
       })
     );
-    expect(content).toBe('l1');
+    expect(content).toBe('l1\n[lines 1-1 of 4]');
   });
 
   it('reads from offset to the end when limit is omitted', async () => {
@@ -393,7 +505,7 @@ describe('read_file', () => {
         arguments: { project: 'ProjA', relative_path: 'lines.txt', offset: 4 }
       })
     );
-    expect(content).toBe('l4\n');
+    expect(content).toBe('l4\n[lines 4-4 of 4]');
   });
 
   it('rejects an unknown project', async () => {
@@ -420,6 +532,57 @@ describe('list_files', () => {
       await client.callTool({ name: 'list_files', arguments: { project: 'ProjA', glob: '*.ts' } })
     );
     expect(payload.files).toEqual(['main.ts', 'src/a.ts']);
+  });
+
+  it('path_prefix lists one subdirectory', async () => {
+    const payload = jsonOf<{ files: string[] }>(
+      await client.callTool({ name: 'list_files', arguments: { project: 'ProjA', path_prefix: 'src' } })
+    );
+    expect(payload.files).toEqual(['src/a.ts']);
+  });
+
+  it('path_prefix refuses an escape, .git and a missing directory', async () => {
+    for (const [prefix, message] of [
+      ['../..', /escapes the project root/],
+      ['.git', /Access forbidden/],
+      ['no_such_dir', /No subdirectory "no_such_dir"/]
+    ] as const) {
+      const result = await client.callTool({
+        name: 'list_files',
+        arguments: { project: 'ProjA', path_prefix: prefix }
+      });
+      expect(isError(result)).toBe(true);
+      expect(textOf(result)).toMatch(message);
+    }
+  });
+
+  it('pages past the cap with offset and next_offset', async () => {
+    const names = Array.from({ length: 501 }, (_, i) => `f${String(i).padStart(4, '0')}.txt`);
+    const dir = path.join(root, 'Group', 'ProjB', 'many');
+    await mkdir(dir);
+    await Promise.all(names.map(n => writeFile(path.join(dir, n), 'x\n')));
+    const first = jsonOf<{ files: string[]; total: number; truncated: boolean; next_offset?: number }>(
+      await client.callTool({ name: 'list_files', arguments: { project: 'ProjB', path_prefix: 'many' } })
+    );
+    expect(first).toMatchObject({ total: 501, truncated: true, next_offset: 500 });
+    expect(first.files).toHaveLength(500);
+    const second = jsonOf<{ files: string[]; truncated: boolean; next_offset?: number }>(
+      await client.callTool({
+        name: 'list_files',
+        arguments: { project: 'ProjB', path_prefix: 'many', offset: first.next_offset }
+      })
+    );
+    expect(second.files).toEqual(['many/f0500.txt']);
+    expect(second.truncated).toBe(false);
+    expect(second).not.toHaveProperty('next_offset');
+  });
+
+  it('returns an empty page for an offset past the end', async () => {
+    const payload = jsonOf<{ files: string[]; total: number; truncated: boolean }>(
+      await client.callTool({ name: 'list_files', arguments: { project: 'ProjA', offset: 1000 } })
+    );
+    expect(payload).toMatchObject({ files: [], truncated: false });
+    expect(payload).not.toHaveProperty('next_offset');
   });
 
   it('rejects an unknown project', async () => {
@@ -601,5 +764,146 @@ describe('file tools on a project created after startup', () => {
     });
     expect(isError(result)).toBe(false);
     await expect(readFile(path.join(lateRoot, 'Group', 'LateWrite', 'out.txt'), 'utf8')).resolves.toBe('written\n');
+  });
+});
+
+describe('find_project', () => {
+  let manyRoot: string;
+  let manyClient: Client;
+
+  beforeAll(async () => {
+    const services = Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`Svc${i}`, { '.git': {} }]));
+    manyRoot = await makeWorkspace({ Group: { ...services, Project_Lens: { '.git': {} } } });
+    const cfg: LensConfig = { roots: [manyRoot], exclude: [], allowWrites: false };
+    const reg = new Registry(cfg);
+    await reg.initialize();
+    manyClient = await connect(reg, cfg);
+  });
+
+  afterAll(async () => {
+    await manyClient.close();
+    await cleanup(manyRoot);
+  });
+
+  it('caps the matches and says so', async () => {
+    const payload = jsonOf<{ matches: unknown[]; truncated: boolean }>(
+      await manyClient.callTool({ name: 'find_project', arguments: { query: 'svc' } })
+    );
+    expect(payload.matches).toHaveLength(10);
+    expect(payload.truncated).toBe(true);
+  });
+
+  it('reports no truncation when every match fits', async () => {
+    const payload = jsonOf<{ matches: Array<{ name: string }>; truncated: boolean }>(
+      await manyClient.callTool({ name: 'find_project', arguments: { query: 'project lens' } })
+    );
+    expect(payload.matches.map(m => m.name)).toEqual(['Project_Lens']);
+    expect(payload.truncated).toBe(false);
+  });
+});
+
+describe('readLines', () => {
+  /** A line far longer than the read cap, spread over many chunks, followed by a short one. */
+  function* hugeFirstLine(chunks: number): Generator<string> {
+    const piece = 'x'.repeat(64 * 1024);
+    for (let i = 0; i < chunks; i++) yield piece;
+    yield '\nsecond\n';
+  }
+
+  it('skips a long line outside the slice without keeping it, in linear time', async () => {
+    const slice = await readLines(hugeFirstLine(4000), 2, 1); // 256 MiB of line 1
+    expect(slice.lines).toEqual(['second']);
+    expect(slice.total).toBe(2);
+  }, 10_000);
+
+  it('stops at the next line once a line fills the cap exactly', async () => {
+    const slice = await readLines([`${'a'.repeat(500_000)}\nhello\n`], 1, Infinity);
+    expect(slice.lines).toEqual(['a'.repeat(500_000), '']);
+    expect(slice.cutAt).toBe(2);
+  });
+
+  it('keeps no more than the cap of a long line inside the slice', async () => {
+    const slice = await readLines(hugeFirstLine(4000), 1, 1);
+    expect(slice.lines[0]).toHaveLength(500_000);
+    expect(slice.cutAt).toBe(1);
+    expect(slice.total).toBe(2);
+  }, 10_000);
+});
+
+describe('group filter with groups that differ only by case', () => {
+  let caseRoot: string;
+  let caseClient: Client;
+
+  beforeAll(async () => {
+    caseRoot = await makeWorkspace({
+      AI: { Upper: { '.git': {}, 'a.ts': 'needle\n' } },
+      ai: { Lower: { '.git': {}, 'b.ts': 'needle\n' } }
+    });
+    const cfg: LensConfig = { roots: [caseRoot], exclude: [], allowWrites: false };
+    const reg = new Registry(cfg);
+    await reg.initialize();
+    caseClient = await connect(reg, cfg);
+  });
+
+  afterAll(async () => {
+    await caseClient.close();
+    await cleanup(caseRoot);
+  });
+
+  it('takes only the group spelled exactly as given', async () => {
+    const table = jsonOf<{ rows: unknown[][] }>(
+      await caseClient.callTool({ name: 'list_projects', arguments: { group: 'AI' } })
+    );
+    expect(table.rows.map(r => r[0])).toEqual(['Upper']);
+    const payload = jsonOf<SearchPayload>(
+      await caseClient.callTool({ name: 'search', arguments: { query: 'needle', group: 'ai' } })
+    );
+    expect(payload.results.map(r => r.project)).toEqual(['Lower']);
+  });
+
+  it('takes every case-insensitive match when none is spelled exactly', async () => {
+    const table = jsonOf<{ rows: unknown[][] }>(
+      await caseClient.callTool({ name: 'list_projects', arguments: { group: 'Ai' } })
+    );
+    expect(table.rows.map(r => r[0]).sort()).toEqual(['Lower', 'Upper']);
+  });
+});
+
+describe('path_prefix under a root reached through a symbolic link', () => {
+  let realRoot: string;
+  let linkRoot: string;
+  let linkClient: Client;
+
+  beforeAll(async () => {
+    realRoot = await makeWorkspace({ Group: { Linked: { '.git': {}, src: { 'a.ts': 'needle\n' } } } });
+    linkRoot = `${realRoot}-link`;
+    await symlink(realRoot, linkRoot);
+    const cfg: LensConfig = { roots: [linkRoot], exclude: [], allowWrites: false };
+    const reg = new Registry(cfg);
+    await reg.initialize();
+    linkClient = await connect(reg, cfg);
+  });
+
+  afterAll(async () => {
+    await linkClient.close();
+    await cleanup(linkRoot);
+    await cleanup(realRoot);
+  });
+
+  it('list_files keeps paths relative to the project root', async () => {
+    const payload = jsonOf<{ files: string[] }>(
+      await linkClient.callTool({ name: 'list_files', arguments: { project: 'Linked', path_prefix: 'src' } })
+    );
+    expect(payload.files).toEqual(['src/a.ts']);
+  });
+
+  it('search still attributes the hits to the project', async () => {
+    const payload = jsonOf<SearchPayload>(
+      await linkClient.callTool({
+        name: 'search',
+        arguments: { query: 'needle', project: 'Linked', path_prefix: 'src' }
+      })
+    );
+    expect(payload.results.map(r => `${r.project}:${r.file}`)).toEqual(['Linked:src/a.ts']);
   });
 });
