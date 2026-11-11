@@ -10,7 +10,8 @@ the way they are. Most of the rules below follow from that.
 
 ### Prerequisites
 
-- **Node.js ≥ 22**
+- **Node.js ^22.13 or ≥ 24** for development: ESLint 10 needs it for `npm run lint`. The server itself runs on any
+  Node.js ≥ 22 (`engines` in `package.json`).
 - **npm** (ships with Node)
 - **`git`**
 - **[ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`)** on `PATH`
@@ -59,6 +60,7 @@ One package, one build. There are no workspaces or sub-packages to juggle.
 ```bash
 npm run build          # tsc
 npm test               # vitest: unit + integration
+npm run lint           # eslint with typescript-eslint type-checked rules, tests included
 npm run test:watch     # watch mode
 npm run test:coverage  # coverage report
 npm run inspector      # manual acceptance via the MCP Inspector
@@ -186,7 +188,7 @@ The fast path is a patch series attached to an issue:
 3. **Verify before you send:**
 
    ```bash
-   npm run build && npm test
+   npm run build && npm run lint && npm test
    ```
 
 4. **Export the series and attach it to the issue:**

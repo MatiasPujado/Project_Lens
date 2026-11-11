@@ -31,7 +31,8 @@
     "bench:store": "npm run build && node dist/benchmark/store.bench.js",
     "bench:tokens": "npm run build && node dist/benchmark/tokens.js",
     "bench:tokens:bytes": "npm run build && LENS_BENCH_COUNTER=bytes node dist/benchmark/tokens.js",
-    "inspector": "npm run build && npx @modelcontextprotocol/inspector node dist/src/index.js $PROJECT_LENS_PATH"
+    "inspector": "npm run build && npx @modelcontextprotocol/inspector node dist/src/index.js $PROJECT_LENS_PATH",
+    "lint": "eslint ."
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.0.0",
@@ -40,11 +41,14 @@
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.115.0",
+    "@eslint/js": "^10.0.1",
     "@modelcontextprotocol/client": "2.0.0",
     "@types/node": "^24.0.0",
     "@types/picomatch": "^4.0.2",
     "@vitest/coverage-v8": "^4.1.10",
+    "eslint": "^10.14.0",
     "typescript": "^5.9.0",
+    "typescript-eslint": "^8.72.2",
     "vitest": "^4.1.10"
   }
 }

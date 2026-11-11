@@ -539,6 +539,7 @@ benchmark/   e2e latency, registry micro-benchmarks, token-cost harness
 ```bash
 npm run build          # tsc
 npm test               # vitest: unit + integration
+npm run lint           # eslint with typescript-eslint type-checked rules, tests included
 npm run test:watch     # watch mode
 npm run test:coverage  # coverage report
 npm run inspector      # manual acceptance via the MCP Inspector

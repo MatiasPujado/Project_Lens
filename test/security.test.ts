@@ -1,4 +1,4 @@
-import { mkdir, symlink, writeFile } from 'node:fs/promises';
+import { symlink } from 'node:fs/promises';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { isForbiddenPath, isSecretFile, noFollowWriteFlags, resolveWithin, validateName } from '../src/security.js';

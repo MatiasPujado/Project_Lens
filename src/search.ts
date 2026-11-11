@@ -98,7 +98,7 @@ class HitCollector {
     if (line) {
       let event: RgEvent;
       try {
-        event = JSON.parse(line);
+        event = JSON.parse(line) as RgEvent;
       } catch {
         return true;
       }
@@ -114,7 +114,7 @@ class HitCollector {
     if (this.truncated) this.eventsSinceLimit++;
 
     let lines = this.texts.get(file);
-    if (!lines) this.texts.set(file, (lines = new Map()));
+    if (!lines) this.texts.set(file, (lines = new Map<number, string>()));
     lines.set(event.data.line_number, (event.data.lines.text ?? '').trimEnd());
 
     if (event.type !== 'match') return;

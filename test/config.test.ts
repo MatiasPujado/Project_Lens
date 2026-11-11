@@ -19,6 +19,15 @@ async function writeConfig(content: string): Promise<string> {
   return file;
 }
 
+function thrown(fn: () => unknown): Error {
+  try {
+    fn();
+  } catch (e) {
+    return e as Error;
+  }
+  throw new Error('expected the call to throw');
+}
+
 describe('loadConfig', () => {
   it('loads a valid config and resolves roots', async () => {
     const file = await writeConfig(JSON.stringify({ roots: ['~/Projects'], exclude: ['**/Archived*/**'] }));
@@ -38,12 +47,16 @@ describe('loadConfig', () => {
 
   it('fails loudly when the path is unreadable', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'lens-cfg-dir-'));
-    expect(() => loadConfig(dir)).toThrow(/not readable at/);
+    const error = thrown(() => loadConfig(dir));
+    expect(error.message).toMatch(/not readable at/);
+    expect((error.cause as NodeJS.ErrnoException).code).toBe('EISDIR');
   });
 
   it('fails loudly on invalid JSON', async () => {
     const file = await writeConfig('{nope');
-    expect(() => loadConfig(file)).toThrow(/not valid JSON/);
+    const error = thrown(() => loadConfig(file));
+    expect(error.message).toMatch(/not valid JSON/);
+    expect(error.cause).toBeInstanceOf(SyntaxError);
   });
 
   it('fails loudly on schema violations', async () => {
@@ -188,7 +201,9 @@ describe('per-root .project-lens.json', () => {
   it('fails loudly on a malformed workspace file rather than ignoring it', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'lens-root-'));
     await writeFile(path.join(dir, ROOT_CONFIG_FILE), '{nope');
-    expect(() => resolveConfig(undefined, { PROJECT_LENS_PATH: dir })).toThrow(/not valid JSON/);
+    const error = thrown(() => resolveConfig(undefined, { PROJECT_LENS_PATH: dir }));
+    expect(error.message).toMatch(/not valid JSON/);
+    expect(error.cause).toBeInstanceOf(SyntaxError);
   });
 
   it('fails loudly when the workspace file parses but is not a valid config', async () => {
