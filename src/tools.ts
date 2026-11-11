@@ -2,6 +2,7 @@ import { readdir, readFile as fsReadFile, mkdir, open } from 'node:fs/promises';
 import path from 'node:path';
 import { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
+import { projectFiles, type ProjectFiles } from './discovery.js';
 import { vcsInfo } from './git.js';
 import { byName, projectKey, type Registry } from './registry.js';
 import { scaffoldProject } from './scaffold.js';
@@ -14,7 +15,8 @@ const README_SNIPPET_LINES = 10;
 
 const PROJECT_KEY_DESC =
   "Project name ('Homebanking') or group-qualified path ('Prisma/NEWPAY/Homebanking') when the " +
-  'name is ambiguous. Matching is case-insensitive; a miss lists the closest names.';
+  'name is ambiguous, or the absolute path when two roots hold the same group-qualified path. ' +
+  'Matching is case-insensitive; a miss lists the closest names.';
 
 const projectKeyArg = z.string().min(1).describe(PROJECT_KEY_DESC);
 
@@ -38,14 +40,23 @@ function guarded<A>(handler: (args: A) => Promise<ToolResult>): (args: A) => Pro
   };
 }
 
-async function readmeSnippet(node: ProjectNode): Promise<string | null> {
-  if (!node.readmePath) return null;
+async function readmeSnippet(readmePath: string | undefined): Promise<string | null> {
+  if (!readmePath) return null;
   try {
-    const raw = await fsReadFile(node.readmePath, 'utf8');
+    const raw = await fsReadFile(readmePath, 'utf8');
     return raw.split('\n').slice(0, README_SNIPPET_LINES).join('\n');
   } catch {
     return null;
   }
+}
+
+/**
+ * Read now, not from the scan: files change inside a project without touching any directory mtime we watch.
+ * An unreadable directory reports no files, as map_workspace does, so one project cannot fail a whole sweep.
+ */
+async function filesOf(node: ProjectNode): Promise<ProjectFiles> {
+  const entries = await readdir(node.absolutePath, { withFileTypes: true }).catch(() => []);
+  return projectFiles(node.absolutePath, entries);
 }
 
 function groupKey(node: ProjectNode): string {
@@ -148,6 +159,9 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
       const vcs = wantsVcs
         ? await Promise.all(nodes.map(n => vcsInfo(n.vcsType, n.absolutePath)))
         : [];
+      const stacks = include?.includes('stack')
+        ? await Promise.all(nodes.map(async n => (await filesOf(n)).detectedStack))
+        : [];
       const columns: Array<[string, (n: ProjectNode, i: number) => unknown]> = [
         ['name', n => n.name],
         ['group', n => groupKey(n)]
@@ -156,7 +170,7 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
       if (wantsVcs) columns.push(['vcs_type', n => n.vcsType]);
       if (include?.includes('branch')) columns.push(['branch', (_n, i) => vcs[i]!.branch]);
       if (include?.includes('is_clean')) columns.push(['is_clean', (_n, i) => vcs[i]!.is_clean]);
-      if (include?.includes('stack')) columns.push(['stack', n => n.detectedStack]);
+      if (include?.includes('stack')) columns.push(['stack', (_n, i) => stacks[i]]);
 
       return json({
         fields: columns.map(([field]) => field),
@@ -195,17 +209,18 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
     guarded(async ({ name }) => {
       await registry.revalidate();
       const node = registry.resolve(name);
+      const files = await filesOf(node);
       const [vcs, snippet] = await Promise.all([
         vcsInfo(node.vcsType, node.absolutePath),
-        readmeSnippet(node)
+        readmeSnippet(files.readmePath)
       ]);
       return json({
         name: node.name,
         group: groupKey(node),
         absolute_path: node.absolutePath,
         vcs,
-        detected_stack: node.detectedStack,
-        key_files: node.keyFiles,
+        detected_stack: files.detectedStack,
+        key_files: files.keyFiles,
         readme_snippet: snippet
       });
     })
@@ -291,6 +306,7 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
       })
     },
     guarded(async ({ project, relative_path, offset, limit }) => {
+      await registry.revalidate();
       const node = registry.resolve(project);
       const resolved = await resolveWithin(node.absolutePath, relative_path);
       let content = await fsReadFile(resolved, 'utf8');
@@ -319,6 +335,7 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
       })
     },
     guarded(async ({ project, glob }) => {
+      await registry.revalidate();
       const node = registry.resolve(project);
       const { files, truncated } = await listFiles(node, glob);
       return json({ project: node.name, count: files.length, truncated, files });
@@ -370,6 +387,7 @@ function registerWriteTools(server: McpServer, registry: Registry, config: LensC
       })
     },
     guarded(async ({ project, relative_path, content }) => {
+      await registry.revalidate();
       const node = registry.resolve(project);
       const resolved = await resolveWithin(node.absolutePath, relative_path, { forWrite: true });
       const flags = noFollowWriteFlags(); // before mkdir, so a refused platform creates nothing

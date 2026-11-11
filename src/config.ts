@@ -83,17 +83,22 @@ export function excludeFor(config: LensConfig, root: string): string[] {
   return [...config.exclude, ...(config.rootExclude?.[root] ?? [])];
 }
 
-export function overrideRoot(config: LensConfig, root: string): LensConfig {
-  const resolved = path.resolve(expandHome(root));
+/** A root must be an existing directory; `source` says where it came from, so the error points at what to fix. */
+function assertRootDirectory(root: string, source: string): void {
   let stat;
   try {
-    stat = statSync(resolved);
+    stat = statSync(root);
   } catch {
-    throw new Error(`PROJECT_LENS_PATH root does not exist: ${resolved}`);
+    throw new Error(`${source} root does not exist: ${root}`);
   }
   if (!stat.isDirectory()) {
-    throw new Error(`PROJECT_LENS_PATH root is not a directory: ${resolved}`);
+    throw new Error(`${source} root is not a directory: ${root}`);
   }
+}
+
+export function overrideRoot(config: LensConfig, root: string): LensConfig {
+  const resolved = path.resolve(expandHome(root));
+  assertRootDirectory(resolved, 'PROJECT_LENS_PATH');
   return { ...config, roots: [resolved] };
 }
 
@@ -104,8 +109,10 @@ export function resolveConfig(rootArg?: string, env: NodeJS.ProcessEnv = process
   const empty: LensConfig = { roots: [], exclude: [], allowWrites: false };
   let config: LensConfig;
   if (root) config = overrideRoot(fromFile ?? empty, root);
-  else if (fromFile && fromFile.roots.length > 0) config = fromFile;
-  else
+  else if (fromFile && fromFile.roots.length > 0) {
+    for (const r of fromFile.roots) assertRootDirectory(r, `Config file ${file}:`);
+    config = fromFile;
+  } else
     throw new Error(
       'No workspace root: export PROJECT_LENS_PATH, pass a root as the first argument, ' +
         `or create a config file at ${file}`

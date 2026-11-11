@@ -70,14 +70,12 @@ describe('scaffoldProject', () => {
     await expect(stat(path.join(node.absolutePath, 'README.md'))).resolves.toBeDefined();
     await expect(stat(path.join(node.absolutePath, '.gitignore'))).resolves.toBeDefined();
     expect(registry.resolve('New_Tool').groupPath).toBe('Experiments');
-    expect(node.readmePath).toBe(path.join(node.absolutePath, 'README.md'));
   });
 
   it('writes the gitignore stub when asked for it alone', async () => {
     const node = await scaffoldProject(registry, [root], 'Experiments', 'Ignored', { gitignore: true });
     expect(await readFile(path.join(node.absolutePath, '.gitignore'), 'utf8')).toContain('node_modules/');
     await expect(stat(path.join(node.absolutePath, 'README.md'))).rejects.toThrow();
-    expect(node.readmePath).toBeUndefined();
   });
 
   it('writes no stubs by default', async () => {
@@ -85,6 +83,5 @@ describe('scaffoldProject', () => {
     await expect(stat(path.join(node.absolutePath, '.git'))).resolves.toBeDefined();
     await expect(stat(path.join(node.absolutePath, 'README.md'))).rejects.toThrow();
     await expect(stat(path.join(node.absolutePath, '.gitignore'))).rejects.toThrow();
-    expect(node.readmePath).toBeUndefined();
   });
 });

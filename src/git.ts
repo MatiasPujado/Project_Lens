@@ -68,10 +68,18 @@ async function filterFreeEnv(dir: string): Promise<NodeJS.ProcessEnv | null> {
   return env;
 }
 
+/**
+ * `symbolic-ref` names the branch even before its first commit, where `rev-parse HEAD` fails. It fails on a
+ * detached HEAD, which `rev-parse --abbrev-ref` reports as `HEAD`.
+ */
+async function branchOf(dir: string): Promise<string | null> {
+  return (await git(dir, ['symbolic-ref', '--short', '-q', 'HEAD'])) ?? git(dir, ['rev-parse', '--abbrev-ref', 'HEAD']);
+}
+
 export async function gitInfo(dir: string): Promise<VcsInfo> {
   const [remote, branch, status] = await Promise.all([
     git(dir, ['remote', 'get-url', 'origin']),
-    git(dir, ['rev-parse', '--abbrev-ref', 'HEAD']),
+    branchOf(dir),
     filterFreeEnv(dir).then(env =>
       env === null ? null : git(dir, ['status', '--porcelain', '--ignore-submodules=all'], env)
     )

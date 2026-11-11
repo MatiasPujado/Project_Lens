@@ -129,8 +129,9 @@ describe('resolveConfig', () => {
   });
 
   it('falls back to the config file when no root is given', async () => {
-    const file = await writeConfig(JSON.stringify({ roots: ['/orig'] }));
-    expect(resolveConfig(undefined, { PROJECTS_MCP_CONFIG: file }).roots).toEqual(['/orig']);
+    const real = await mkdtemp(path.join(tmpdir(), 'lens-root-'));
+    const file = await writeConfig(JSON.stringify({ roots: [real] }));
+    expect(resolveConfig(undefined, { PROJECTS_MCP_CONFIG: file }).roots).toEqual([real]);
   });
 
   it('keeps writes off unless the config file or the env var turns them on', async () => {
@@ -161,6 +162,26 @@ describe('resolveConfig', () => {
   it('fails loudly when the config file supplies no root either', async () => {
     const file = await writeConfig(JSON.stringify({ exclude: ['x'] }));
     expect(() => resolveConfig(undefined, { PROJECTS_MCP_CONFIG: file })).toThrow(/PROJECT_LENS_PATH/);
+  });
+
+  it('fails startup when a config-file root does not exist, naming the file', async () => {
+    const real = await mkdtemp(path.join(tmpdir(), 'lens-root-'));
+    const file = await writeConfig(JSON.stringify({ roots: [real, '/nonexistent/root'] }));
+    const error = thrown(() => resolveConfig(undefined, { PROJECTS_MCP_CONFIG: file }));
+    expect(error.message).toMatch(/root does not exist: \/nonexistent\/root/);
+    expect(error.message).toContain(file);
+  });
+
+  it('fails startup when a config-file root is not a directory', async () => {
+    const notDir = await writeConfig('{}');
+    const file = await writeConfig(JSON.stringify({ roots: [notDir] }));
+    expect(() => resolveConfig(undefined, { PROJECTS_MCP_CONFIG: file })).toThrow(/root is not a directory/);
+  });
+
+  it('does not check config-file roots that a command-line root replaces', async () => {
+    const real = await mkdtemp(path.join(tmpdir(), 'lens-root-'));
+    const file = await writeConfig(JSON.stringify({ roots: ['/nonexistent/root'] }));
+    expect(resolveConfig(real, { PROJECTS_MCP_CONFIG: file }).roots).toEqual([real]);
   });
 });
 

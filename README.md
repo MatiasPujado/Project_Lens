@@ -65,8 +65,9 @@ SVN working copies are indexed and visible, but the `svn` binary is never invoke
 state stay `null`. Git projects get all three, queried live on the calls that report them.
 
 Projects are addressed by a bare name (`Gateway`) when it is unique, or by the group-qualified path
-(`Work/Payments/Gateway`) when it is not. Matching is case-insensitive; an ambiguous name returns the qualified keys, a
-miss returns the closest matches.
+(`Work/Payments/Gateway`) when it is not. When two roots hold the same group-qualified path, both copies stay indexed
+and each is addressed by its absolute path. Matching is case-insensitive; an ambiguous name returns the qualified keys
+(or the absolute paths, for such twins), a miss returns the closest matches.
 
 **Freshness:** full scan at startup, an explicit `refresh_registry` tool, plus mtime revalidation of root and group
 directories piggybacked onto registry calls. No filesystem watcher, no disk cache, nothing to invalidate by hand.
@@ -466,7 +467,7 @@ Two things that commonly trip people up:
 
 Only needed for exclusion globs, multiple roots, or enabling writes. Location: `$PROJECTS_MCP_CONFIG` if set, else
 `$XDG_CONFIG_HOME/projects-mcp/config.json`, else `~/.config/projects-mcp/config.json`. A missing file is fine; a
-malformed one fails startup.
+malformed one fails startup, and so does a root it lists that does not exist or is not a directory.
 
 ```json
 {

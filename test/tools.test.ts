@@ -1,4 +1,4 @@
-import { chmod, readFile, stat, symlink } from 'node:fs/promises';
+import { chmod, mkdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -96,9 +96,7 @@ describe('map_workspace', () => {
       groupPath: 'Group',
       absolutePath: path.join(root, 'Group', 'never-existed'),
       root,
-      vcsType: 'git',
-      detectedStack: [],
-      keyFiles: []
+      vcsType: 'git'
     });
     const isolatedClient = await connect(isolated, config);
     try {
@@ -506,5 +504,102 @@ describe('write_file and symbolic links', () => {
     expect(isError(result)).toBe(true);
     expect(textOf(result)).toMatch(/symbolic link/);
     await expect(readFile(target, 'utf8')).resolves.toBe(before);
+  });
+});
+
+describe('file tools on a project created after startup', () => {
+  let lateRoot: string;
+  let lateClient: Client;
+
+  beforeAll(async () => {
+    lateRoot = await makeWorkspace({ Group: { Early: { '.git': {} } } });
+    const cfg: LensConfig = { roots: [lateRoot], exclude: [], allowWrites: true };
+    const reg = new Registry(cfg);
+    await reg.initialize();
+    lateClient = await connect(reg, cfg);
+  });
+
+  afterAll(async () => {
+    await lateClient.close();
+    await cleanup(lateRoot);
+  });
+
+  async function createProject(name: string): Promise<void> {
+    await mkdir(path.join(lateRoot, 'Group', name, '.git'), { recursive: true });
+    await writeFile(path.join(lateRoot, 'Group', name, 'notes.txt'), 'late\n');
+  }
+
+  it('read_file finds it', async () => {
+    await createProject('LateRead');
+    const result = await lateClient.callTool({
+      name: 'read_file',
+      arguments: { project: 'LateRead', relative_path: 'notes.txt' }
+    });
+    expect(textOf(result)).toBe('late\n');
+  });
+
+  it('list_files finds it', async () => {
+    await createProject('LateList');
+    const payload = jsonOf<{ files: string[] }>(
+      await lateClient.callTool({ name: 'list_files', arguments: { project: 'LateList' } })
+    );
+    expect(payload.files).toEqual(['notes.txt']);
+  });
+
+  it('project_info reads stack, key files and README at call time, not from the startup scan', async () => {
+    const early = path.join(lateRoot, 'Group', 'Early');
+    await writeFile(path.join(early, 'package.json'), '{}\n');
+    await writeFile(path.join(early, 'README.md'), '# Early\n');
+    const info = jsonOf<{ detected_stack: string[]; key_files: string[]; readme_snippet: string | null }>(
+      await lateClient.callTool({ name: 'project_info', arguments: { name: 'Early' } })
+    );
+    expect(info.detected_stack).toEqual(['Node.js']);
+    expect(info.key_files).toEqual(['package.json']);
+    expect(info.readme_snippet).toBe('# Early\n');
+  });
+
+  it('list_projects reads the stack at call time too', async () => {
+    await writeFile(path.join(lateRoot, 'Group', 'Early', 'go.mod'), 'module early\n');
+    const payload = jsonOf<{ fields: string[]; rows: unknown[][] }>(
+      await lateClient.callTool({ name: 'list_projects', arguments: { include: ['stack'] } })
+    );
+    const stack = payload.fields.indexOf('stack');
+    const early = payload.rows.find(row => row[0] === 'Early')!;
+    expect(early[stack]).toContain('Go');
+  });
+
+  it.skipIf(!notRoot)('list_projects reports an empty stack for an unreadable project, not an error', async () => {
+    const locked = path.join(lateRoot, 'Group', 'Locked');
+    await mkdir(path.join(locked, '.git'), { recursive: true });
+    await lateClient.callTool({ name: 'list_projects', arguments: {} }); // registers it while still readable
+    await chmod(locked, 0o000);
+    try {
+      const result = await lateClient.callTool({ name: 'list_projects', arguments: { include: ['stack'] } });
+      expect(isError(result)).toBe(false);
+      const payload = jsonOf<{ fields: string[]; rows: unknown[][] }>(result);
+      const row = payload.rows.find(r => r[0] === 'Locked')!;
+      expect(row[payload.fields.indexOf('stack')]).toEqual([]);
+    } finally {
+      await chmod(locked, 0o755);
+    }
+  });
+
+  it('read_file refuses an absolute path that names no registered project', async () => {
+    const result = await lateClient.callTool({
+      name: 'read_file',
+      arguments: { project: '/etc', relative_path: 'passwd' }
+    });
+    expect(isError(result)).toBe(true);
+    expect(textOf(result)).toMatch(/Project not found/);
+  });
+
+  it('write_file finds it', async () => {
+    await createProject('LateWrite');
+    const result = await lateClient.callTool({
+      name: 'write_file',
+      arguments: { project: 'LateWrite', relative_path: 'out.txt', content: 'written\n' }
+    });
+    expect(isError(result)).toBe(false);
+    await expect(readFile(path.join(lateRoot, 'Group', 'LateWrite', 'out.txt'), 'utf8')).resolves.toBe('written\n');
   });
 });

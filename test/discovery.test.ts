@@ -1,7 +1,7 @@
-import { chmod } from 'node:fs/promises';
+import { chmod, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { scanRoot } from '../src/discovery.js';
+import { projectFiles, scanRoot } from '../src/discovery.js';
 import { cleanup, makeWorkspace, notRoot } from './helpers.js';
 
 let root: string;
@@ -55,7 +55,6 @@ describe('scanRoot', () => {
     const svn = projects.find(p => p.name === 'Homebanking_svn')!;
     expect(svn.vcsType).toBe('svn');
     expect(svn.groupPath).toBe('Legacy');
-    expect(svn.detectedStack).toEqual(['Java']);
     expect(projects.find(p => p.name === 'Homebanking')!.vcsType).toBe('git');
   });
 
@@ -78,38 +77,54 @@ describe('scanRoot', () => {
     expect(projects.map(p => p.name)).toContain('Homebanking');
   });
 
+  it.skipIf(!notRoot)('still revalidates a root it cannot read', async () => {
+    const locked = await makeWorkspace({ Group: { P: { '.git': {} } } });
+    await chmod(locked, 0o000);
+    try {
+      const { projects, groupDirs } = await scanRoot(locked, []);
+      expect(projects).toEqual([]);
+      expect([...groupDirs.keys()]).toEqual([locked]);
+    } finally {
+      await chmod(locked, 0o755);
+      await cleanup(locked);
+    }
+  });
+
   it('still revalidates a root that holds no project at all', async () => {
     const barren = await makeWorkspace({ Empty: { 'note.txt': 'x' } });
     const { projects, groupDirs } = await scanRoot(barren, []);
     expect(projects).toEqual([]);
-    expect(groupDirs).toEqual([barren]);
+    expect([...groupDirs.keys()]).toEqual([barren]);
     await cleanup(barren);
   });
 
-  it('captures manifests, stack and readme in the boundary readdir', async () => {
+  async function homebankingFiles() {
     const { projects } = await scanRoot(root, []);
-    const hb = projects.find(p => p.name === 'Homebanking')!;
-    expect(hb.keyFiles).toEqual(['Dockerfile', 'pom.xml']);
-    expect(hb.detectedStack.sort()).toEqual(['Docker', 'Java']);
-    expect(hb.readmePath).toMatch(/README\.md$/);
+    const dir = projects.find(p => p.name === 'Homebanking')!.absolutePath;
+    return projectFiles(dir, await readdir(dir, { withFileTypes: true }));
+  }
+
+  it('projectFiles reports manifests, stack and readme from a project directory', async () => {
+    const files = await homebankingFiles();
+    expect(files.keyFiles).toEqual(['Dockerfile', 'pom.xml']);
+    expect(files.detectedStack.sort()).toEqual(['Docker', 'Java']);
+    expect(files.readmePath).toMatch(/README\.md$/);
   });
 
-  it('never lists secret-pattern files', async () => {
-    const { projects } = await scanRoot(root, []);
-    const hb = projects.find(p => p.name === 'Homebanking')!;
-    expect(hb.keyFiles.some(f => f.startsWith('.env'))).toBe(false);
+  it('projectFiles never lists secret-pattern files', async () => {
+    expect((await homebankingFiles()).keyFiles.some(f => f.startsWith('.env'))).toBe(false);
   });
 
   it('records group dirs for mtime revalidation', async () => {
-    const { groupDirs } = await scanRoot(root, []);
-    expect(groupDirs).toContain(root);
-    expect(groupDirs.some(d => d.endsWith('Prisma/NEWPAY'))).toBe(true);
-    expect(groupDirs.some(d => d.endsWith('Homebanking'))).toBe(false);
+    const dirs = [...(await scanRoot(root, [])).groupDirs.keys()];
+    expect(dirs).toContain(root);
+    expect(dirs.some(d => d.endsWith('Prisma/NEWPAY'))).toBe(true);
+    expect(dirs.some(d => d.endsWith('Homebanking'))).toBe(false);
   });
 
   it('skips dirs that lead to no project, keeping revalidation cheap', async () => {
-    const { groupDirs } = await scanRoot(root, []);
-    expect(groupDirs.some(d => d.endsWith('NotAProject'))).toBe(false);
+    const dirs = [...(await scanRoot(root, [])).groupDirs.keys()];
+    expect(dirs.some(d => d.endsWith('NotAProject'))).toBe(false);
   });
 
   it.skipIf(!notRoot)('skips unreadable dirs instead of aborting the scan', async () => {

@@ -1,4 +1,5 @@
 import { stat } from 'node:fs/promises';
+import path from 'node:path';
 import { excludeFor } from './config.js';
 import { scanRoot } from './discovery.js';
 import type { LensConfig, ProjectNode } from './types.js';
@@ -21,10 +22,22 @@ export function projectKey(node: ProjectNode): string {
   return node.groupPath ? `${node.groupPath}/${node.name}` : node.name;
 }
 
+/** Names a match the caller can pass back: its key, or its absolute path when another root holds the same key. */
+function choices(matches: ProjectNode[]): string[] {
+  const keys = matches.map(projectKey);
+  const shared = (key: string) => keys.indexOf(key) !== keys.lastIndexOf(key);
+  return matches.map((node, i) => (shared(keys[i]!) ? node.absolutePath : keys[i]!));
+}
+
 export class Registry {
-  private readonly nodes = new Map<string, ProjectNode>();
-  private readonly dirMtimes = new Map<string, number>();
-  private readonly rootOfDir = new Map<string, string>();
+  /** Keyed by absolute path: two roots may hold the same group/name, and both copies stay reachable. */
+  private nodes = new Map<string, ProjectNode>();
+  private dirMtimes = new Map<string, number>();
+  private rootOfDir = new Map<string, string>();
+  /** The scan now running, if any. Callers that arrive meanwhile wait for it instead of starting another. */
+  private inFlight: Promise<void> | undefined;
+  /** Projects added while a scan runs; the scan's maps were copied before them, so the swap puts them back. */
+  private addedDuringScan: ProjectNode[] = [];
 
   constructor(private readonly config: LensConfig) {}
 
@@ -34,49 +47,60 @@ export class Registry {
 
   async refresh(): Promise<ScanStats> {
     const start = performance.now();
-    this.nodes.clear();
-    this.dirMtimes.clear();
-    this.rootOfDir.clear();
-    for (const root of this.config.roots) {
-      await this.scanOne(root);
-    }
+    // A revalidation in flight may rescan only some roots; wait until none runs, then scan them all.
+    while (this.inFlight) await this.inFlight;
+    await this.exclusive(() => this.rescan(this.config.roots));
     return this.stats(start);
   }
 
-  private async scanOne(root: string): Promise<void> {
-    for (const [dir, owner] of this.rootOfDir) {
-      if (owner === root) {
-        this.dirMtimes.delete(dir);
-        this.rootOfDir.delete(dir);
-      }
-    }
-    for (const [key, node] of this.nodes) {
-      if (node.root === root) this.nodes.delete(key);
-    }
-    const { projects, groupDirs } = await scanRoot(root, excludeFor(this.config, root));
-    for (const node of projects) this.nodes.set(projectKey(node), node);
-    for (const dir of groupDirs) {
-      this.rootOfDir.set(dir, root);
-      try {
-        this.dirMtimes.set(dir, (await stat(dir)).mtimeMs);
-      } catch {
-        console.error(`Warning: group directory "${dir}" vanished during scan`);
-      }
-    }
+  async revalidate(): Promise<void> {
+    await this.exclusive(async () => this.rescan(await this.staleRoots()));
   }
 
-  async revalidate(): Promise<void> {
-    const staleRoots = new Set<string>();
+  private exclusive(scan: () => Promise<void>): Promise<void> {
+    this.inFlight ??= scan().finally(() => {
+      this.inFlight = undefined;
+      this.addedDuringScan = [];
+    });
+    return this.inFlight;
+  }
+
+  private async staleRoots(): Promise<string[]> {
+    const stale = new Set<string>();
     for (const [dir, mtime] of this.dirMtimes) {
       const root = this.rootOfDir.get(dir)!;
-      if (staleRoots.has(root)) continue;
+      if (stale.has(root)) continue;
       try {
-        if ((await stat(dir)).mtimeMs > mtime) staleRoots.add(root);
+        if ((await stat(dir)).mtimeMs > mtime) stale.add(root);
       } catch {
-        staleRoots.add(root);
+        stale.add(root);
       }
     }
-    for (const root of staleRoots) await this.scanOne(root);
+    return [...stale];
+  }
+
+  /**
+   * Scans `roots` into copies of the maps and swaps them in at the end, so a lookup made while the
+   * scan awaits the filesystem still sees the previous, complete registry.
+   */
+  private async rescan(roots: string[]): Promise<void> {
+    if (roots.length === 0) return;
+    const rescanned = new Set(roots);
+    const nodes = new Map([...this.nodes].filter(([, node]) => !rescanned.has(node.root)));
+    const rootOfDir = new Map([...this.rootOfDir].filter(([, owner]) => !rescanned.has(owner)));
+    const dirMtimes = new Map([...this.dirMtimes].filter(([dir]) => rootOfDir.has(dir)));
+    for (const root of roots) {
+      const { projects, groupDirs } = await scanRoot(root, excludeFor(this.config, root));
+      for (const node of projects) nodes.set(node.absolutePath, node);
+      for (const [dir, mtime] of groupDirs) {
+        rootOfDir.set(dir, root);
+        dirMtimes.set(dir, mtime);
+      }
+    }
+    for (const node of this.addedDuringScan) nodes.set(node.absolutePath, node);
+    this.nodes = nodes;
+    this.rootOfDir = rootOfDir;
+    this.dirMtimes = dirMtimes;
   }
 
   getAll(): ProjectNode[] {
@@ -104,18 +128,18 @@ export class Registry {
   }
 
   resolve(nameOrPath: string): ProjectNode {
-    const byKey = this.nodes.get(nameOrPath);
-    if (byKey) return byKey;
+    const byPath = path.isAbsolute(nameOrPath) ? this.nodes.get(path.resolve(nameOrPath)) : undefined;
+    if (byPath) return byPath;
+    const all = this.getAll();
+    const exact = all.filter(n => projectKey(n) === nameOrPath);
     const q = nameOrPath.toLowerCase();
-    const matches = this.getAll().filter(
-      n => n.name.toLowerCase() === q || projectKey(n).toLowerCase() === q
-    );
+    const matches =
+      exact.length > 0 ? exact : all.filter(n => n.name.toLowerCase() === q || projectKey(n).toLowerCase() === q);
     if (matches.length === 1) return matches[0]!;
     if (matches.length > 1) {
-      const keys = matches.map(projectKey).join(', ');
-      throw new Error(`Project name "${nameOrPath}" is ambiguous; use one of: ${keys}`);
+      throw new Error(`Project name "${nameOrPath}" is ambiguous; use one of: ${choices(matches).join(', ')}`);
     }
-    const candidates = this.find(nameOrPath).slice(0, 5).map(projectKey);
+    const candidates = choices(this.find(nameOrPath).slice(0, 5));
     throw new Error(
       candidates.length > 0
         ? `Project not found: "${nameOrPath}". Closest matches: ${candidates.join(', ')}`
@@ -124,7 +148,8 @@ export class Registry {
   }
 
   add(node: ProjectNode): void {
-    this.nodes.set(projectKey(node), node);
+    this.nodes.set(node.absolutePath, node);
+    if (this.inFlight) this.addedDuringScan.push(node);
   }
 
   private stats(start: number): ScanStats {

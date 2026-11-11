@@ -70,6 +70,19 @@ describe('gitInfo', () => {
       is_clean: null
     });
   });
+
+  it('reports the branch of a repository with no commits yet', async () => {
+    const fresh = path.join(root, 'Fresh');
+    await run('git', ['init', '-q', '-b', 'fresh', fresh]);
+    expect((await gitInfo(fresh)).branch).toBe('fresh');
+  });
+
+  it('reports HEAD for a detached HEAD', async () => {
+    const detached = path.join(root, 'Detached');
+    await run('git', ['clone', '-q', repo, detached]);
+    await run('git', ['checkout', '-q', '--detach'], { cwd: detached });
+    expect((await gitInfo(detached)).branch).toBe('HEAD');
+  });
 });
 
 describe('gitInfo and repository-supplied programs', () => {
