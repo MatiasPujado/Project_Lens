@@ -125,7 +125,7 @@ describe('list_projects', () => {
 
   it('returns every project sorted by group-qualified key when no group is given', async () => {
     const table = jsonOf<Table>(await client.callTool({ name: 'list_projects', arguments: {} }));
-    expect(objects(table).map(p => `${p.group}/${p.name}`)).toEqual([
+    expect(objects(table).map(p => `${String(p.group)}/${String(p.name)}`)).toEqual([
       'Group/ProjA',
       'Group/ProjB',
       'Group/SvnProj',

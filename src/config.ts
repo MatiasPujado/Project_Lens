@@ -40,13 +40,13 @@ export function loadConfig(file: string = configPath()): LensConfig | undefined 
     raw = readFileSync(file, 'utf8');
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-    throw new Error(`Project-Lens config not readable at ${file}: ${(e as Error).message}`);
+    throw new Error(`Project-Lens config not readable at ${file}: ${(e as Error).message}`, { cause: e });
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch (e) {
-    throw new Error(`Project-Lens config at ${file} is not valid JSON: ${(e as Error).message}`);
+    throw new Error(`Project-Lens config at ${file} is not valid JSON: ${(e as Error).message}`, { cause: e });
   }
   const result = configSchema.safeParse(parsed);
   if (!result.success) {
@@ -69,7 +69,7 @@ export function loadRootExclude(root: string): string[] {
   try {
     parsed = JSON.parse(raw);
   } catch (e) {
-    throw new Error(`Root config at ${file} is not valid JSON: ${(e as Error).message}`);
+    throw new Error(`Root config at ${file} is not valid JSON: ${(e as Error).message}`, { cause: e });
   }
   const result = rootConfigSchema.safeParse(parsed);
   if (!result.success) {
@@ -107,7 +107,8 @@ export function resolveConfig(rootArg?: string, env: NodeJS.ProcessEnv = process
   else if (fromFile && fromFile.roots.length > 0) config = fromFile;
   else
     throw new Error(
-      `No workspace root: export PROJECT_LENS_PATH, pass a root as the first argument, or create a config file at ${file}`
+      'No workspace root: export PROJECT_LENS_PATH, pass a root as the first argument, ' +
+        `or create a config file at ${file}`
     );
   const rootExclude: Record<string, string[]> = {};
   for (const r of config.roots) {
