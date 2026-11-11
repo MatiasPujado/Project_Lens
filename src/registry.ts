@@ -22,6 +22,23 @@ export function projectKey(node: ProjectNode): string {
   return node.groupPath ? `${node.groupPath}/${node.name}` : node.name;
 }
 
+const SEPARATORS = /[\s_.-]/g;
+
+/**
+ * exact > prefix > substring, first on the name as written, then with separators removed. A name as written
+ * always ranks above a separator-insensitive one, so an original lists before a copy renamed without separators.
+ */
+function matchScore(name: string, query: string, looseQuery: string): number {
+  if (name === query) return 6;
+  if (name.startsWith(query)) return 5;
+  if (name.includes(query)) return 4;
+  if (looseQuery === '') return 0;
+  const loose = name.replace(SEPARATORS, '');
+  if (loose === looseQuery) return 3;
+  if (loose.startsWith(looseQuery)) return 2;
+  return loose.includes(looseQuery) ? 1 : 0;
+}
+
 /** Names a match the caller can pass back: its key, or its absolute path when another root holds the same key. */
 function choices(matches: ProjectNode[]): string[] {
   const keys = matches.map(projectKey);
@@ -112,19 +129,17 @@ export class Registry {
     return [...groups].sort(byName);
   }
 
+  /** Every project whose name matches `query`, best first; callers cap the list themselves. */
   find(query: string): ProjectNode[] {
     const q = query.toLowerCase();
+    const loose = q.replace(SEPARATORS, '');
     const scored: Array<[number, ProjectNode]> = [];
     for (const node of this.nodes.values()) {
-      const name = node.name.toLowerCase();
-      let score = 0;
-      if (name === q) score = 3;
-      else if (name.startsWith(q)) score = 2;
-      else if (name.includes(q)) score = 1;
+      const score = matchScore(node.name.toLowerCase(), q, loose);
       if (score > 0) scored.push([score, node]);
     }
     scored.sort((a, b) => b[0] - a[0] || byName(a[1].name, b[1].name));
-    return scored.slice(0, 10).map(([, node]) => node);
+    return scored.map(([, node]) => node);
   }
 
   resolve(nameOrPath: string): ProjectNode {

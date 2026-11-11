@@ -1,4 +1,5 @@
-import { readdir, readFile as fsReadFile, mkdir, open } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { readdir, readFile as fsReadFile, mkdir, open, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
@@ -6,12 +7,13 @@ import { projectFiles, type ProjectFiles } from './discovery.js';
 import { vcsInfo } from './git.js';
 import { byName, projectKey, type Registry } from './registry.js';
 import { scaffoldProject } from './scaffold.js';
-import { listFiles, searchScope } from './search.js';
+import { listFiles, MAX_FILES, searchScope } from './search.js';
 import { noFollowWriteFlags, resolveWithin } from './security.js';
 import type { LensConfig, ProjectNode } from './types.js';
 
 const MAX_READ_CHARS = 500_000;
 const README_SNIPPET_LINES = 10;
+const MAX_FIND_MATCHES = 10;
 
 const PROJECT_KEY_DESC =
   "Project name ('Homebanking') or group-qualified path ('Prisma/NEWPAY/Homebanking') when the " +
@@ -30,10 +32,17 @@ function text(value: string): ToolResult {
   return { content: [{ type: 'text', text: value }] };
 }
 
-function guarded<A>(handler: (args: A) => Promise<ToolResult>): (args: A) => Promise<ToolResult> {
-  return async args => {
+/** The part of the SDK's request context the tools use: the signal the client's cancellation aborts. */
+interface CallContext {
+  mcpReq: { signal: AbortSignal };
+}
+
+function guarded<A>(
+  handler: (args: A, ctx: CallContext) => Promise<ToolResult>
+): (args: A, ctx: CallContext) => Promise<ToolResult> {
+  return async (args, ctx) => {
     try {
-      return await handler(args);
+      return await handler(args, ctx);
     } catch (e) {
       return { content: [{ type: 'text', text: (e as Error).message }], isError: true };
     }
@@ -59,12 +68,108 @@ async function filesOf(node: ProjectNode): Promise<ProjectFiles> {
   return projectFiles(node.absolutePath, entries);
 }
 
+export interface LineSlice {
+  lines: string[];
+  total: number;
+  endsWithNewline: boolean;
+  /** The line the read cap stopped in, when it did. */
+  cutAt?: number;
+}
+
+/**
+ * Keeps lines first..first+count-1 (1-based) of `source` within MAX_READ_CHARS and counts every line. Only the
+ * kept text is held: a line outside the slice, or past the cap, is scanned for its newline and dropped, so even a
+ * file that is one huge line costs constant memory and linear time.
+ */
+export async function readLines(
+  source: AsyncIterable<string | Buffer> | Iterable<string>,
+  first: number,
+  count: number
+): Promise<LineSlice> {
+  const slice: LineSlice = { lines: [], total: 0, endsWithNewline: false };
+  let line = 1;
+  let kept = '';
+  let chars = 0;
+  let open = false; // text seen since the last newline
+  const wanted = () => line >= first && line < first + count && slice.cutAt === undefined;
+  const keep = (text: string) => {
+    if (!wanted()) return;
+    const room = Math.max(0, MAX_READ_CHARS - chars - kept.length); // a line that filled the cap leaves none
+    if (text.length > room) {
+      kept += text.slice(0, room);
+      slice.cutAt = line;
+    } else {
+      kept += text;
+    }
+  };
+  const endLine = () => {
+    if (wanted() || slice.cutAt === line) {
+      slice.lines.push(kept);
+      chars += kept.length + 1;
+    }
+    kept = '';
+    line++;
+  };
+  for await (const chunk of source) {
+    const text = String(chunk);
+    let start = 0;
+    for (let nl = text.indexOf('\n'); nl !== -1; nl = text.indexOf('\n', start)) {
+      keep(text.slice(start, nl));
+      endLine();
+      start = nl + 1;
+    }
+    if (start < text.length) {
+      keep(text.slice(start));
+      open = true;
+    } else {
+      open = false;
+    }
+  }
+  slice.endsWithNewline = !open && line > 1;
+  if (open) endLine();
+  slice.total = line - 1;
+  return slice;
+}
+
 function groupKey(node: ProjectNode): string {
   return node.groupPath === '' ? '(root)' : node.groupPath;
 }
 
-function inGroup(node: ProjectNode, group: string): boolean {
-  return node.groupPath === group || node.groupPath.startsWith(group + '/');
+function inGroup(groupPath: string, group: string): boolean {
+  return groupPath === group || groupPath.startsWith(group + '/');
+}
+
+/**
+ * Projects under `group`, for list_projects and search alike. Case is ignored, but when some group matches as
+ * written only that one counts, so `AI` and `ai` on a case-sensitive disk stay apart. An unknown group is an error.
+ */
+function projectsInGroup(registry: Registry, group: string): ProjectNode[] {
+  const all = registry.getAll();
+  const exact = all.filter(n => inGroup(n.groupPath, group));
+  if (exact.length > 0) return exact;
+  const folded = all.filter(n => inGroup(n.groupPath.toLowerCase(), group.toLowerCase()));
+  if (folded.length === 0) throw new Error(`Unknown group: "${group}"`);
+  return folded;
+}
+
+/**
+ * `pathPrefix` checked by resolveWithin, which answers with a real path. ripgrep output is attributed against the
+ * project's configured path, so the answer is rebased onto it: under a root reached through a symbolic link the two
+ * differ.
+ */
+async function prefixDir(node: ProjectNode, pathPrefix: string): Promise<string> {
+  const real = await resolveWithin(node.absolutePath, pathPrefix);
+  return path.join(node.absolutePath, path.relative(await realpath(node.absolutePath), real));
+}
+
+/** A project's subdirectory for list_files; a missing one is an error naming it. */
+async function subdirectory(node: ProjectNode, pathPrefix: string): Promise<string> {
+  try {
+    return await prefixDir(node, pathPrefix);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; // escapes and .git must surface as they are
+    throw new Error(`No subdirectory "${pathPrefix}" in project ${node.name}`, { cause: e });
+  }
 }
 
 /**
@@ -77,7 +182,7 @@ async function scopeDirsFor(scoped: ProjectNode[], pathPrefix?: string): Promise
   const dirs: string[] = [];
   for (const node of scoped) {
     try {
-      dirs.push(await resolveWithin(node.absolutePath, pathPrefix));
+      dirs.push(await prefixDir(node, pathPrefix));
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; // escapes must surface
     }
@@ -152,9 +257,8 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
     },
     guarded(async ({ group, include }) => {
       await registry.revalidate();
-      let nodes = registry.getAll();
-      if (group) nodes = nodes.filter(n => inGroup(n, group));
-      nodes.sort((a, b) => projectKey(a).localeCompare(projectKey(b)));
+      const nodes = group ? projectsInGroup(registry, group) : registry.getAll();
+      nodes.sort((a, b) => byName(projectKey(a), projectKey(b)));
       const wantsVcs = include?.some(f => f === 'branch' || f === 'is_clean') ?? false;
       const vcs = wantsVcs
         ? await Promise.all(nodes.map(n => vcsInfo(n.vcsType, n.absolutePath)))
@@ -182,18 +286,22 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
   server.registerTool(
     'find_project',
     {
-      description: 'Fuzzy match a project name; returns group path and absolute path.',
-      inputSchema: z.object({ query: z.string().min(1).describe('Fuzzy match against project names.') })
+      description:
+        'Find projects by name, case-insensitive: exact, prefix or substring, also with spaces, _, - and . ' +
+        'ignored. Names as written rank first. Returns group path and absolute path; truncated when capped.',
+      inputSchema: z.object({ query: z.string().min(1).describe("Project name or part of it, e.g. 'project lens'.") })
     },
     guarded(async ({ query }) => {
       await registry.revalidate();
+      const found = registry.find(query);
       return json({
         query,
-        matches: registry.find(query).map(n => ({
+        matches: found.slice(0, MAX_FIND_MATCHES).map(n => ({
           name: n.name,
           group: groupKey(n),
           absolute_path: n.absolutePath
-        }))
+        })),
+        truncated: found.length > MAX_FIND_MATCHES
       });
     })
   );
@@ -234,7 +342,9 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
         'Narrow before widening: project or group plus path_prefix and glob costs a fraction of ' +
         'scope:"all". Results are grouped by file.',
       inputSchema: z.object({
-        query: z.string().min(1).describe('Content search pattern (literal or regex).'),
+        query: z.string().min(1).describe('Content search pattern, a regex unless fixed_strings is set.'),
+        fixed_strings: z.boolean().default(false).describe('Match query literally: ( [ { . * are plain text.'),
+        ignore_case: z.boolean().default(false).describe('Match regardless of letter case.'),
         project: z.string().optional().describe(`Confine to one project. ${PROJECT_KEY_DESC}`),
         group: z.string().optional().describe("Confine to a group path, e.g. 'Prisma/NEWPAY'."),
         scope: z.literal('all').optional()
@@ -252,7 +362,9 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
           .describe('Max hits returned across all files; truncated flag set when more exist.')
       })
     },
-    guarded(async ({ query, project, group, scope, path_prefix, glob, exclude, context_lines, limit }) => {
+    guarded(async (args, ctx) => {
+      const { query, project, group, scope, path_prefix, glob, exclude, context_lines, limit } = args;
+      const { fixed_strings, ignore_case } = args;
       if ([project, group, scope].filter(Boolean).length !== 1) {
         throw new Error('Exactly one of "project", "group" or "scope" is required');
       }
@@ -263,8 +375,7 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
         scoped = [registry.resolve(project)];
         scopeLabel = { project };
       } else if (group) {
-        scoped = registry.getAll().filter(n => inGroup(n, group));
-        if (scoped.length === 0) throw new Error(`Unknown group: "${group}"`);
+        scoped = projectsInGroup(registry, group);
         scopeLabel = { group };
       } else {
         scoped = registry.getAll();
@@ -278,7 +389,10 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
         limit,
         glob,
         exclude,
-        contextLines: context_lines
+        contextLines: context_lines,
+        fixedStrings: fixed_strings,
+        ignoreCase: ignore_case,
+        signal: ctx.mcpReq.signal
       });
       return json({
         query,
@@ -297,7 +411,8 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
       description:
         'Read a file inside a registered project. Paths escaping the project root are rejected — ' +
         'absolute paths, ../ traversal and symlinks pointing outside all fail. ' +
-        'Paths inside .git and secret-pattern files (.env*, keys, certificates, credential stores) are never returned.',
+        'Paths inside .git and secret-pattern files (.env*, keys, certificates, credential stores) are never ' +
+        'returned. A line slice ends with [lines a-b of N].',
       inputSchema: z.object({
         project: projectKeyArg,
         relative_path: z.string().min(1).describe('Path relative to project root. Escapes rejected.'),
@@ -309,17 +424,15 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
       await registry.revalidate();
       const node = registry.resolve(project);
       const resolved = await resolveWithin(node.absolutePath, relative_path);
-      let content = await fsReadFile(resolved, 'utf8');
-      if (offset !== undefined || limit !== undefined) {
-        const start = (offset ?? 1) - 1;
-        const lines = content.split('\n');
-        content = lines.slice(start, limit === undefined ? undefined : start + limit).join('\n');
+      const first = offset ?? 1;
+      const slice = await readLines(createReadStream(resolved, { encoding: 'utf8' }), first, limit ?? Infinity);
+      const body = slice.lines.join('\n');
+      if (slice.cutAt !== undefined) {
+        return text(`${body}\n[truncated at ${MAX_READ_CHARS} chars in line ${slice.cutAt} of ${slice.total}]`);
       }
-      return text(
-        content.length > MAX_READ_CHARS
-          ? content.slice(0, MAX_READ_CHARS) + `\n[truncated at ${MAX_READ_CHARS} chars]`
-          : content
-      );
+      if (offset === undefined && limit === undefined) return text(slice.endsWithNewline ? `${body}\n` : body);
+      if (slice.lines.length === 0) return text(`[offset ${first} is past the last line, ${slice.total}]`);
+      return text(`${body}\n[lines ${first}-${first + slice.lines.length - 1} of ${slice.total}]`);
     })
   );
 
@@ -328,17 +441,28 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
     {
       description:
         'List file paths inside a registered project (respects .gitignore, skips hidden files). ' +
-        'Paths are relative to the project root.',
+        `Paths are relative to the project root, sorted, at most ${MAX_FILES} per call; ` +
+        'when truncated, pass next_offset as offset for the next page.',
       inputSchema: z.object({
         project: projectKeyArg,
-        glob: z.string().optional().describe("Optional filename filter, e.g. '*.ts'.")
+        glob: z.string().optional().describe("Optional filename filter, e.g. '*.ts'."),
+        path_prefix: z.string().optional().describe("Subdirectory to list, e.g. 'src'."),
+        offset: z.number().int().min(0).default(0).describe('Paths to skip; the previous call\'s next_offset.')
       })
     },
-    guarded(async ({ project, glob }) => {
+    guarded(async ({ project, glob, path_prefix, offset }, ctx) => {
       await registry.revalidate();
       const node = registry.resolve(project);
-      const { files, truncated } = await listFiles(node, glob);
-      return json({ project: node.name, count: files.length, truncated, files });
+      const dir = path_prefix === undefined ? undefined : await subdirectory(node, path_prefix);
+      const { files, total, truncated } = await listFiles(node, { glob, dir, offset, signal: ctx.mcpReq.signal });
+      return json({
+        project: node.name,
+        count: files.length,
+        total,
+        truncated,
+        ...(truncated ? { next_offset: offset + files.length } : {}),
+        files
+      });
     })
   );
 

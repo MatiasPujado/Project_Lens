@@ -1,4 +1,4 @@
-import { execFile, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import path from 'node:path';
 import readline from 'node:readline';
 import { isForbiddenPath } from './security.js';
@@ -22,26 +22,63 @@ export interface SearchOptions {
   glob?: string;
   exclude?: string[];
   contextLines?: number;
+  fixedStrings?: boolean;
+  ignoreCase?: boolean;
+  /** The request's cancellation; aborting it kills ripgrep. */
+  signal?: AbortSignal;
 }
 
 export const MAX_FILES = 500;
 const MAX_EXCERPT_CHARS = 300;
+const MAX_STDERR_CHARS = 4096;
 
 /** A user's ripgreprc could hide files or change the output format, so the server never reads one. */
 const RG_BASE_ARGS = ['--no-config'];
 
-function runRg(args: string[]): Promise<string> {
+/**
+ * Runs ripgrep and hands it each stdout line. `onLine` returns false once it has all it can use; ripgrep is
+ * then stopped instead of producing output nobody reads. Exit 1 means no matches, not a failure.
+ */
+function runRg(args: string[], onLine: (line: string) => boolean, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
-    execFile('rg', [...RG_BASE_ARGS, ...args], { maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
-      if (err && (err as NodeJS.ErrnoException).code === 'ENOENT') {
-        reject(new Error('ripgrep (rg) is not installed or not on PATH; the search tool requires it'));
-      } else if (err && (err as { code?: unknown }).code === 1) {
-        resolve(''); // rg exit 1 = no matches
-      } else if (err) {
-        reject(new Error(`ripgrep failed: ${err.message}`));
-      } else {
-        resolve(stdout);
-      }
+    const rg = spawn('rg', [...RG_BASE_ARGS, ...args], { signal });
+    let stderr = '';
+    let done = false;
+    const finish = (fn: () => void) => {
+      if (done) return;
+      done = true;
+      fn();
+    };
+
+    rg.on('error', (err: NodeJS.ErrnoException) => {
+      finish(() =>
+        reject(
+          err.name === 'AbortError'
+            ? new Error('Request cancelled; ripgrep stopped')
+            : err.code === 'ENOENT'
+              ? new Error('ripgrep (rg) is not installed or not on PATH; this tool requires it')
+              : new Error(`ripgrep failed: ${err.message}`)
+        )
+      );
+    });
+    rg.stderr.on('data', chunk => {
+      stderr = (stderr + String(chunk)).slice(0, MAX_STDERR_CHARS); // only the start reaches the error
+    });
+
+    const lines = readline.createInterface({ input: rg.stdout });
+    lines.on('line', line => {
+      if (onLine(line)) return;
+      lines.close();
+      rg.kill();
+      finish(resolve);
+    });
+
+    rg.on('close', code => {
+      finish(() =>
+        code === 0 || code === 1
+          ? resolve()
+          : reject(new Error(`ripgrep failed: ${stderr.trim() || `exit code ${code}`}`))
+      );
     });
   });
 }
@@ -160,9 +197,10 @@ function excerptAt(lines: Map<number, string>, at: number, contextLines: number)
   const block: string[] = [];
   for (let n = at - contextLines; n <= at + contextLines; n++) {
     const text = lines.get(n);
-    if (text !== undefined) block.push(text);
+    // Each line is capped on its own, so a long neighbour can never push the matching line out.
+    if (text !== undefined) block.push(text.slice(0, MAX_EXCERPT_CHARS));
   }
-  return block.join('\n').slice(0, MAX_EXCERPT_CHARS * (contextLines * 2 + 1));
+  return block.join('\n');
 }
 
 export async function searchScope(
@@ -173,68 +211,54 @@ export async function searchScope(
 ): Promise<SearchResult> {
   if (scopeDirs.length === 0) return { files: [], hitsReturned: 0, truncated: false };
   const contextLines = opts.contextLines ?? 0;
-  const args = [...RG_BASE_ARGS, '--json', '-e', query];
+  const args = ['--json'];
+  if (opts.fixedStrings) args.push('-F');
+  if (opts.ignoreCase) args.push('-i');
+  args.push('-e', query);
   if (opts.glob) args.push('-g', opts.glob);
   args.push(...excludeGlobArgs(opts.exclude));
   if (contextLines) args.push('-C', String(contextLines));
   args.push('--', ...scopeDirs);
 
   const collector = new HitCollector(projects, opts.limit, contextLines);
-  return new Promise((resolve, reject) => {
-    const rg = spawn('rg', args);
-    let stderr = '';
-    let done = false;
-    const finish = (fn: () => void) => {
-      if (done) return;
-      done = true;
-      fn();
-    };
+  await runRg(args, line => collector.accept(line), opts.signal);
+  return collector.result();
+}
 
-    rg.on('error', (err: NodeJS.ErrnoException) => {
-      finish(() =>
-        reject(
-          err.code === 'ENOENT'
-            ? new Error('ripgrep (rg) is not installed or not on PATH; the search tool requires it')
-            : new Error(`ripgrep failed: ${err.message}`)
-        )
-      );
-    });
-    rg.stderr.on('data', chunk => {
-      stderr += String(chunk);
-    });
-
-    const lines = readline.createInterface({ input: rg.stdout });
-    lines.on('line', line => {
-      if (!collector.accept(line)) {
-        lines.close();
-        rg.kill();
-        finish(() => resolve(collector.result()));
-      }
-    });
-
-    rg.on('close', code => {
-      finish(() =>
-        code === 0 || code === 1
-          ? resolve(collector.result())
-          : reject(new Error(`ripgrep failed: ${stderr.trim() || `exit code ${code}`}`))
-      );
-    });
-  });
+export interface ListOptions {
+  glob?: string;
+  /** Directory inside the project to list; paths stay relative to the project root. */
+  dir?: string;
+  /** Paths to skip, so a caller can page past MAX_FILES. */
+  offset?: number;
+  /** The request's cancellation; aborting it kills ripgrep. */
+  signal?: AbortSignal;
 }
 
 export async function listFiles(
   project: ProjectNode,
-  glob?: string
-): Promise<{ files: string[]; truncated: boolean }> {
+  opts: ListOptions = {}
+): Promise<{ files: string[]; total: number; truncated: boolean }> {
   const args = ['--files'];
-  if (glob) args.push('-g', glob);
-  args.push('--', project.absolutePath);
-  const stdout = await runRg(args);
-  const files = stdout
-    .split('\n')
-    .filter(f => f !== '')
+  if (opts.glob) args.push('-g', opts.glob);
+  args.push('--', opts.dir ?? project.absolutePath);
+  const listed: string[] = [];
+  await runRg(
+    args,
+    line => {
+      listed.push(line);
+      return true;
+    },
+    opts.signal
+  );
+  const all = listed
     .map(f => path.relative(project.absolutePath, f))
     .filter(f => !isForbiddenPath(f))
     .sort();
-  return { files: files.slice(0, MAX_FILES), truncated: files.length > MAX_FILES };
+  const offset = opts.offset ?? 0;
+  return {
+    files: all.slice(offset, offset + MAX_FILES),
+    total: all.length,
+    truncated: all.length > offset + MAX_FILES
+  };
 }
