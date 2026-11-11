@@ -255,9 +255,7 @@ describe('parseRgOutput', () => {
     groupPath: 'Group',
     absolutePath: '/w/Group/ProjA',
     root: '/w',
-    vcsType: 'git',
-    detectedStack: [],
-    keyFiles: []
+    vcsType: 'git'
   };
 
   function event(type: string, file: string, line = 1, text = 'hit\n'): string {
