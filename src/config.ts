@@ -29,9 +29,9 @@ export function expandHome(p: string): string {
 }
 
 export function configPath(env: NodeJS.ProcessEnv = process.env): string {
-  if (env.PROJECTS_MCP_CONFIG) return expandHome(env.PROJECTS_MCP_CONFIG);
+  if (env.PROJECT_LENS_CONFIG) return expandHome(env.PROJECT_LENS_CONFIG);
   const xdg = env.XDG_CONFIG_HOME ? expandHome(env.XDG_CONFIG_HOME) : path.join(homedir(), '.config');
-  return path.join(xdg, 'projects-mcp', 'config.json');
+  return path.join(xdg, 'project-lens', 'config.json');
 }
 
 export function loadConfig(file: string = configPath()): LensConfig | undefined {
@@ -40,13 +40,13 @@ export function loadConfig(file: string = configPath()): LensConfig | undefined 
     raw = readFileSync(file, 'utf8');
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-    throw new Error(`Project-Lens config not readable at ${file}: ${(e as Error).message}`);
+    throw new Error(`Project-Lens config not readable at ${file}: ${(e as Error).message}`, { cause: e });
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch (e) {
-    throw new Error(`Project-Lens config at ${file} is not valid JSON: ${(e as Error).message}`);
+    throw new Error(`Project-Lens config at ${file} is not valid JSON: ${(e as Error).message}`, { cause: e });
   }
   const result = configSchema.safeParse(parsed);
   if (!result.success) {
@@ -69,7 +69,7 @@ export function loadRootExclude(root: string): string[] {
   try {
     parsed = JSON.parse(raw);
   } catch (e) {
-    throw new Error(`Root config at ${file} is not valid JSON: ${(e as Error).message}`);
+    throw new Error(`Root config at ${file} is not valid JSON: ${(e as Error).message}`, { cause: e });
   }
   const result = rootConfigSchema.safeParse(parsed);
   if (!result.success) {
@@ -83,31 +83,39 @@ export function excludeFor(config: LensConfig, root: string): string[] {
   return [...config.exclude, ...(config.rootExclude?.[root] ?? [])];
 }
 
-export function overrideRoot(config: LensConfig, root: string): LensConfig {
-  const resolved = path.resolve(expandHome(root));
+/** A root must be an existing directory; `source` says where it came from, so the error points at what to fix. */
+function assertRootDirectory(root: string, source: string): void {
   let stat;
   try {
-    stat = statSync(resolved);
+    stat = statSync(root);
   } catch {
-    throw new Error(`PROJECT_LENS_PATH root does not exist: ${resolved}`);
+    throw new Error(`${source} root does not exist: ${root}`);
   }
   if (!stat.isDirectory()) {
-    throw new Error(`PROJECT_LENS_PATH root is not a directory: ${resolved}`);
+    throw new Error(`${source} root is not a directory: ${root}`);
   }
+}
+
+export function overrideRoot(config: LensConfig, root: string, source: string): LensConfig {
+  const resolved = path.resolve(expandHome(root));
+  assertRootDirectory(resolved, source);
   return { ...config, roots: [resolved] };
 }
 
 export function resolveConfig(rootArg?: string, env: NodeJS.ProcessEnv = process.env): LensConfig {
   const file = configPath(env);
   const fromFile = loadConfig(file);
-  const root = rootArg || env.PROJECT_LENS_PATH;
   const empty: LensConfig = { roots: [], exclude: [], allowWrites: false };
   let config: LensConfig;
-  if (root) config = overrideRoot(fromFile ?? empty, root);
-  else if (fromFile && fromFile.roots.length > 0) config = fromFile;
-  else
+  if (rootArg) config = overrideRoot(fromFile ?? empty, rootArg, 'Command-line argument');
+  else if (env.PROJECT_LENS_PATH) config = overrideRoot(fromFile ?? empty, env.PROJECT_LENS_PATH, 'PROJECT_LENS_PATH');
+  else if (fromFile && fromFile.roots.length > 0) {
+    for (const r of fromFile.roots) assertRootDirectory(r, `Config file ${file}:`);
+    config = fromFile;
+  } else
     throw new Error(
-      `No workspace root: export PROJECT_LENS_PATH, pass a root as the first argument, or create a config file at ${file}`
+      'No workspace root: export PROJECT_LENS_PATH, pass a root as the first argument, ' +
+        `or create a config file at ${file}`
     );
   const rootExclude: Record<string, string[]> = {};
   for (const r of config.roots) {

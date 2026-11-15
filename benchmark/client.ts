@@ -13,7 +13,7 @@ export async function connect(name: string): Promise<Client> {
       args: process.argv[2] ? [serverEntry, process.argv[2]] : [serverEntry],
       env: {
         ...getDefaultEnvironment(),
-        ...(process.env.PROJECTS_MCP_CONFIG ? { PROJECTS_MCP_CONFIG: process.env.PROJECTS_MCP_CONFIG } : {}),
+        ...(process.env.PROJECT_LENS_CONFIG ? { PROJECT_LENS_CONFIG: process.env.PROJECT_LENS_CONFIG } : {}),
         ...(process.env.PROJECT_LENS_PATH ? { PROJECT_LENS_PATH: process.env.PROJECT_LENS_PATH } : {}),
         PROJECT_LENS_ALLOW_WRITES: '1' // the write_file scenario needs the write tools registered
       }

@@ -163,8 +163,8 @@ let nInfo = 0;
 for (const row of registry.rows) {
   const group = groupOf(row);
   const name = group === '(root)' ? nameOf(row) : `${group}/${nameOf(row)}`;
-  nInfo += await countTokens(JSON.stringify({ name: 'project_info', arguments: { name } }));
-  nInfo += await countTokens(await callText(client, 'project_info', { name }));
+  nInfo += await countTokens(JSON.stringify({ name: 'project_info', arguments: { project: name } }));
+  nInfo += await countTokens(await callText(client, 'project_info', { project: name }));
 }
 
 const sweep = rows.find(r => r.id === 'list_projects (sweep)');
@@ -203,6 +203,6 @@ if (savings.length === 0) {
   );
   console.log('  stable rows only — the search rows save more, but not the same amount twice');
 }
-console.log('scaffold_project is USER-INITIATED ONLY — schema cost counted, tool never invoked');
+console.log('scaffold_project asks the user to confirm — schema cost counted, tool never invoked');
 
 await client.close();

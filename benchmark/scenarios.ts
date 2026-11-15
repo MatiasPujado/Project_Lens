@@ -71,13 +71,14 @@ export function scenarios(f: Fixtures): Scenario[] {
     {
       id: 'project_info',
       tool: 'project_info',
-      args: { name: p.name },
+      args: { project: p.name },
       bash:
         `git -C ${dir} branch --show-current; ` +
         `git -C ${dir} remote get-url origin; ` +
         `git -C ${dir} status --porcelain | head -1; ` +
         `ls ${dir} | grep -E ` +
-        String.raw`'^(package\.json|tsconfig\.json|Cargo\.toml|go\.mod|pyproject\.toml|requirements\.txt|pom\.xml|build\.gradle|Dockerfile|docker-compose\.yml|CMakeLists\.txt)$'; ` +
+        String.raw`'^(package\.json|tsconfig\.json|Cargo\.toml|go\.mod|pyproject\.toml|requirements\.txt|` +
+        String.raw`pom\.xml|build\.gradle|Dockerfile|docker-compose\.yml|CMakeLists\.txt)$'; ` +
         `head -10 ${file(f.readme)}`
     },
     {

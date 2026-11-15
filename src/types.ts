@@ -4,9 +4,6 @@ export interface ProjectNode {
   absolutePath: string;
   root: string;
   vcsType: 'git' | 'svn';
-  detectedStack: string[];
-  keyFiles: string[];
-  readmePath?: string;
 }
 
 export interface LensConfig {

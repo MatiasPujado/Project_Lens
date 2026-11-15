@@ -19,7 +19,8 @@ beforeAll(async () => {
       ProjA: {
         '.git': {},
         'main.ts': 'export class TransactionManager {}\n',
-        '.env': 'TransactionManager=secret\n'
+        '.env': 'TransactionManager=secret\n',
+        'server.key': 'TransactionManager=secret\n'
       },
       ProjB: {
         '.git': {},
@@ -117,6 +118,23 @@ describe('searchScope', () => {
     }
   });
 
+  it('stops ripgrep when the request is cancelled', async () => {
+    const cancel = new AbortController();
+    const pending = searchScope(scope, registry.getAll(), 'TransactionManager', {
+      limit: LIMIT,
+      signal: cancel.signal
+    });
+    cancel.abort();
+    await expect(pending).rejects.toThrow(/cancelled/);
+  });
+
+  it('keeps only the start of a long ripgrep error', async () => {
+    const missing = Array.from({ length: 300 }, (_, i) => path.join(root, `missing-${i}`));
+    const error = await searchScope(missing, registry.getAll(), 'x', { limit: LIMIT }).catch((e: Error) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message.length).toBeLessThanOrEqual('ripgrep failed: '.length + 4096);
+  });
+
   it('fails loudly when ripgrep rejects the pattern', async () => {
     await expect(searchScope(scope, registry.getAll(), '[', { limit: LIMIT })).rejects.toThrow(
       /ripgrep failed/
@@ -199,7 +217,13 @@ describe('listFiles', () => {
 
   it('applies glob filters', async () => {
     const projB = registry.resolve('ProjB');
-    const { files } = await listFiles(projB, '*.md');
+    const { files } = await listFiles(projB, { glob: '*.md' });
+    expect(files).toEqual(['docs/arch.md']);
+  });
+
+  it('lists only a subdirectory, with paths still relative to the project root', async () => {
+    const projB = registry.resolve('ProjB');
+    const { files } = await listFiles(projB, { dir: path.join(projB.absolutePath, 'docs') });
     expect(files).toEqual(['docs/arch.md']);
   });
 
@@ -208,7 +232,7 @@ describe('listFiles', () => {
     const bareRegistry = new Registry({ roots: [bare], exclude: [], allowWrites: false });
     await bareRegistry.initialize();
     try {
-      expect(await listFiles(bareRegistry.resolve('Bare'))).toEqual({ files: [], truncated: false });
+      expect(await listFiles(bareRegistry.resolve('Bare'))).toEqual({ files: [], total: 0, truncated: false });
     } finally {
       await cleanup(bare);
     }
@@ -226,13 +250,23 @@ describe('listFiles', () => {
       expect(files).toHaveLength(MAX_FILES);
       expect(truncated).toBe(true);
       expect(files[0]).toBe('f0000.ts'); // sorted, so the cut is the tail and not an arbitrary slice
+
+      const next = await listFiles(manyRegistry.resolve('Many'), { offset: MAX_FILES });
+      expect(next).toEqual({ files: ['f0500.ts'], total: MAX_FILES + 1, truncated: false });
     } finally {
       await cleanup(many);
     }
   });
 
+  it('stops ripgrep when the request is cancelled', async () => {
+    const cancel = new AbortController();
+    const pending = listFiles(registry.resolve('ProjA'), { signal: cancel.signal });
+    cancel.abort();
+    await expect(pending).rejects.toThrow(/cancelled/);
+  });
+
   it('surfaces a real ripgrep failure rather than reporting no files', async () => {
-    await expect(listFiles(registry.resolve('ProjA'), '[')).rejects.toThrow(/ripgrep failed/);
+    await expect(listFiles(registry.resolve('ProjA'), { glob: '[' })).rejects.toThrow(/ripgrep failed/);
   });
 
   it('explains when ripgrep is not on PATH', async () => {
@@ -254,9 +288,7 @@ describe('parseRgOutput', () => {
     groupPath: 'Group',
     absolutePath: '/w/Group/ProjA',
     root: '/w',
-    vcsType: 'git',
-    detectedStack: [],
-    keyFiles: []
+    vcsType: 'git'
   };
 
   function event(type: string, file: string, line = 1, text = 'hit\n'): string {
@@ -310,6 +342,12 @@ describe('parseRgOutput', () => {
     expect(files[0]!.lines[0]![1]).toHaveLength(300);
   });
 
+  it('drops hits inside .git, even where ripgrep reports them', () => {
+    const stdout = [match('/w/Group/ProjA/.git/config'), match('/w/Group/ProjA/main.ts')].join('\n');
+    const { files } = parseRgOutput(stdout, [project], LIMIT);
+    expect(files.map(f => f.file)).toEqual(['main.ts']);
+  });
+
   it('groups every hit in a file under one entry', () => {
     const stdout = [
       match('/w/Group/ProjA/main.ts', 1),
@@ -333,6 +371,16 @@ describe('parseRgOutput', () => {
     expect(files[0]!.lines).toEqual([[2, 'before\nhit\nafter']]);
   });
 
+  it('keeps the matching line when a context line is very long', () => {
+    const stdout = [
+      event('context', '/w/Group/ProjA/main.ts', 1, 'x'.repeat(2000) + '\n'),
+      match('/w/Group/ProjA/main.ts', 2, 'hit\n'),
+      event('context', '/w/Group/ProjA/main.ts', 3, 'after\n')
+    ].join('\n');
+    const { files } = parseRgOutput(stdout, [project], LIMIT, 1);
+    expect(files[0]!.lines).toEqual([[2, `${'x'.repeat(300)}\nhit\nafter`]]);
+  });
+
   it('folds only the context that exists when the match sits at the file edge', () => {
     const stdout = [
       match('/w/Group/ProjA/main.ts', 1, 'hit\n'),
@@ -353,5 +401,44 @@ describe('parseRgOutput', () => {
     const uncapped = parseRgOutput(stdout, [project], 200);
     expect(uncapped.hitsReturned).toBe(150);
     expect(uncapped.truncated).toBe(false);
+  });
+});
+
+describe('listFiles access policy', () => {
+  it('drops a secret-pattern file ripgrep lists because it is not hidden', async () => {
+    const { files } = await listFiles(registry.resolve('ProjA'));
+    expect(files).toContain('main.ts');
+    expect(files).not.toContain('server.key');
+  });
+});
+
+describe('listFiles .git policy', () => {
+  it('drops a path inside .git, even where ripgrep lists one', async () => {
+    const projA = registry.resolve('ProjA');
+    const script = `#!/bin/sh\necho '${projA.absolutePath}/.git/config'\necho '${projA.absolutePath}/main.ts'\n`;
+    const { files } = await withFakeRg(script, 0o755, () => listFiles(projA));
+    expect(files).toEqual(['main.ts']);
+  });
+});
+
+describe('ripgrep user configuration', () => {
+  it('is ignored by search and list_files', async () => {
+    const configFile = path.join(root, 'hostile.ripgreprc');
+    await writeFile(configFile, '--glob=!*.ts\n--glob=!*.md\n');
+    const saved = process.env.RIPGREP_CONFIG_PATH;
+    process.env.RIPGREP_CONFIG_PATH = configFile;
+    try {
+      const projA = registry.resolve('ProjA');
+      expect((await listFiles(projA)).files).toContain('main.ts');
+      const result = await searchScope(scope, registry.getAll(), 'TransactionManager', { limit: LIMIT });
+      const files = flatten(result.files).map(h => h.file);
+      expect(files).toHaveLength(2);
+      expect(files).toEqual(
+        expect.arrayContaining([expect.stringContaining('arch.md'), expect.stringContaining('main.ts')])
+      );
+    } finally {
+      if (saved === undefined) delete process.env.RIPGREP_CONFIG_PATH;
+      else process.env.RIPGREP_CONFIG_PATH = saved;
+    }
   });
 });
