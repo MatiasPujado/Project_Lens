@@ -30,7 +30,9 @@ beforeAll(async () => {
 
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
-  client = new Client({ name: 'lens-test', version: '0.0.0' });
+  // A user who confirms: scaffold_project asks before it creates anything.
+  client = new Client({ name: 'lens-test', version: '0.0.0' }, { capabilities: { elicitation: { form: {} } } });
+  client.setRequestHandler('elicitation/create', () => ({ action: 'accept', content: { confirm: true } }));
   await client.connect(clientTransport);
 });
 
@@ -156,6 +158,25 @@ describe('Project-Lens over MCP', () => {
       arguments: { project: 'Homebanking', relative_path: '../../../etc/passwd' }
     });
     expect(isError(escape)).toBe(true);
+  });
+
+  it('annotates every tool with its effect on the environment', async () => {
+    const readOnly = { readOnlyHint: true, openWorldHint: false };
+    const expected: Record<string, object> = {
+      map_workspace: readOnly,
+      list_groups: readOnly,
+      list_projects: readOnly,
+      find_project: readOnly,
+      project_info: readOnly,
+      search: readOnly,
+      read_file: readOnly,
+      list_files: readOnly,
+      refresh_registry: readOnly,
+      write_file: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+      scaffold_project: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
+    };
+    const { tools } = await client.listTools();
+    expect(Object.fromEntries(tools.map(t => [t.name, t.annotations]))).toEqual(expected);
   });
 
   it('scaffold_project and refresh_registry round-trip', async () => {
