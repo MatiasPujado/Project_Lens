@@ -203,6 +203,6 @@ if (savings.length === 0) {
   );
   console.log('  stable rows only — the search rows save more, but not the same amount twice');
 }
-console.log('scaffold_project is USER-INITIATED ONLY — schema cost counted, tool never invoked');
+console.log('scaffold_project asks the user to confirm — schema cost counted, tool never invoked');
 
 await client.close();

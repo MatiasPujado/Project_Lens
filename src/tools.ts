@@ -1,12 +1,18 @@
 import { createReadStream } from 'node:fs';
 import { readdir, readFile as fsReadFile, mkdir, open, realpath } from 'node:fs/promises';
 import path from 'node:path';
-import { McpServer } from '@modelcontextprotocol/server';
+import {
+  acceptedContent,
+  inputRequired,
+  inputResponse,
+  McpServer,
+  type InputRequiredResult
+} from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { projectFiles, type ProjectFiles } from './discovery.js';
 import { vcsInfo } from './git.js';
 import { byName, projectKey, type Registry } from './registry.js';
-import { scaffoldProject } from './scaffold.js';
+import { scaffoldProject, scaffoldTarget } from './scaffold.js';
 import { listFiles, MAX_FILES, searchScope } from './search.js';
 import { noFollowWriteFlags, resolveWithin } from './security.js';
 import type { LensConfig, ProjectNode } from './types.js';
@@ -14,6 +20,11 @@ import type { LensConfig, ProjectNode } from './types.js';
 const MAX_READ_CHARS = 500_000;
 const README_SNIPPET_LINES = 10;
 const MAX_FIND_MATCHES = 10;
+const CONFIRM = 'confirm';
+const ConfirmAnswer = z.object({ confirm: z.boolean() });
+
+/** Every tool that only reads: none changes the workspace, and none reaches beyond the configured roots. */
+const READ_ONLY = { readOnlyHint: true, openWorldHint: false };
 
 const PROJECT_KEY_DESC =
   "Project name ('Homebanking') or group-qualified path ('Prisma/NEWPAY/Homebanking') when the " +
@@ -32,14 +43,17 @@ function text(value: string): ToolResult {
   return { content: [{ type: 'text', text: value }] };
 }
 
-/** The part of the SDK's request context the tools use: the signal the client's cancellation aborts. */
+/**
+ * The part of the SDK's request context the tools use: the signal the client's cancellation aborts, and, on the
+ * retry after a tool asked a question, the client's answers and the state the tool sent with that question.
+ */
 interface CallContext {
-  mcpReq: { signal: AbortSignal };
+  mcpReq: { signal: AbortSignal; inputResponses?: Record<string, unknown>; requestState?: () => unknown };
 }
 
-function guarded<A>(
-  handler: (args: A, ctx: CallContext) => Promise<ToolResult>
-): (args: A, ctx: CallContext) => Promise<ToolResult> {
+function guarded<A, R extends ToolResult | InputRequiredResult = ToolResult>(
+  handler: (args: A, ctx: CallContext) => Promise<R>
+): (args: A, ctx: CallContext) => Promise<R | ToolResult> {
   return async (args, ctx) => {
     try {
       return await handler(args, ctx);
@@ -196,6 +210,7 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
   server.registerTool(
     'map_workspace',
     {
+      annotations: READ_ONLY,
       description: 'Tree overview of all groups and their projects across configured roots.',
       inputSchema: z.object({
         max_depth: z.number().int().min(1).max(3).default(2)
@@ -234,7 +249,7 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
 
   server.registerTool(
     'list_groups',
-    { description: 'Flat list of all group paths.', inputSchema: z.object({}) },
+    { description: 'Flat list of all group paths.', annotations: READ_ONLY, inputSchema: z.object({}) },
     guarded(async () => {
       await registry.revalidate();
       return json({ groups: registry.groups() });
@@ -244,6 +259,7 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
   server.registerTool(
     'list_projects',
     {
+      annotations: READ_ONLY,
       description:
         'List projects, optionally filtered by group path. Use include for bulk metadata sweeps ' +
         '(one call instead of N project_info calls); branch/is_clean are queried live. ' +
@@ -286,6 +302,7 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
   server.registerTool(
     'find_project',
     {
+      annotations: READ_ONLY,
       description:
         'Find projects by name, case-insensitive: exact, prefix or substring, also with spaces, _, - and . ' +
         'ignored. Names as written rank first. Returns group path and absolute path; truncated when capped.',
@@ -309,6 +326,7 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
   server.registerTool(
     'project_info',
     {
+      annotations: READ_ONLY,
       description:
         'Full metadata for one project: path, vcs state (queried live on every call), detected stack, ' +
         'key files, README snippet.',
@@ -337,6 +355,7 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
   server.registerTool(
     'search',
     {
+      annotations: READ_ONLY,
       description:
         'Content search (ripgrep) over one project, one group, or every registered project. ' +
         'Narrow before widening: project or group plus path_prefix and glob costs a fraction of ' +
@@ -408,6 +427,7 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
   server.registerTool(
     'read_file',
     {
+      annotations: READ_ONLY,
       description:
         'Read a file inside a registered project. Paths escaping the project root are rejected — ' +
         'absolute paths, ../ traversal and symlinks pointing outside all fail. ' +
@@ -439,6 +459,7 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
   server.registerTool(
     'list_files',
     {
+      annotations: READ_ONLY,
       description:
         'List file paths inside a registered project (respects .gitignore, skips hidden files). ' +
         `Paths are relative to the project root, sorted, at most ${MAX_FILES} per call; ` +
@@ -471,6 +492,7 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
   server.registerTool(
     'refresh_registry',
     {
+      annotations: READ_ONLY,
       description: 'Force a full re-scan of all configured roots. Returns scan stats.',
       inputSchema: z.object({})
     },
@@ -493,11 +515,32 @@ async function writeNoFollow(file: string, content: string, flags: number): Prom
   }
 }
 
+/**
+ * The question scaffold_project puts to the user. The client shows it and retries the call with the answer and,
+ * echoed back as requestState, the path it named, so the retry can refuse a target that moved in the meantime.
+ */
+function askToCreate(target: string): InputRequiredResult {
+  return inputRequired({
+    requestState: target,
+    inputRequests: {
+      [CONFIRM]: inputRequired.elicit({
+        message: `Create the project ${target} and run git init in it?`,
+        requestedSchema: {
+          type: 'object',
+          properties: { confirm: { type: 'boolean', description: 'Yes to create the project.' } },
+          required: ['confirm']
+        }
+      })
+    }
+  });
+}
+
 /** Registered only when allow_writes is on: everything here mutates the workspace. */
 function registerWriteTools(server: McpServer, registry: Registry, config: LensConfig): void {
   server.registerTool(
     'write_file',
     {
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
       description:
         'Write a file inside a registered project. Paths escaping the project root are rejected — ' +
         'absolute paths, ../ traversal and symlinks pointing outside all fail. Also refused: any path inside .git, ' +
@@ -528,19 +571,39 @@ function registerWriteTools(server: McpServer, registry: Registry, config: LensC
   server.registerTool(
     'scaffold_project',
     {
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
       description:
-        'USER-INITIATED ONLY. Create <group>/<name> under the matching root and run git init. No network.',
+        'Create <group>/<name> under the matching root, or <name> straight under root when group is omitted, and ' +
+        'run git init. No network. Asks the user to confirm the exact path first; a client that cannot ask, a ' +
+        'decline or a cancel creates nothing.',
       inputSchema: z.object({
-        group: z.string().min(1).describe('Existing group path the project goes under.'),
+        group: z.string().min(1).optional().describe('Existing group path the project goes under.'),
+        root: z.string().min(1).optional()
+          .describe('A configured root, as map_workspace lists it. Required without group when several roots exist.'),
         name: z.string().min(1)
           .describe('New project dir name. Validated: no separators, no shell metacharacters.'),
         readme: z.boolean().default(false).describe('Seed the project with a README.md.'),
         gitignore: z.boolean().default(false).describe('Seed the project with a .gitignore.')
       })
     },
-    guarded(async ({ group, name, readme, gitignore }) => {
-      const node = await scaffoldProject(registry, config.roots, group, name, { readme, gitignore });
-      return json({ created: node.absolutePath, group: node.groupPath, name: node.name });
+    guarded(async ({ group, root, name, readme, gitignore }, ctx) => {
+      const { target } = await scaffoldTarget(config.roots, group, name, root);
+      const answers = ctx.mcpReq.inputResponses;
+      if (inputResponse(answers, CONFIRM).kind === 'missing') return askToCreate(target);
+      if (acceptedContent(answers, CONFIRM, ConfirmAnswer)?.confirm !== true) {
+        throw new Error(`Project not created: the user did not confirm ${target}`);
+      }
+      const confirmedTarget = ctx.mcpReq.requestState?.(); // a client can send answers without it
+      if (typeof confirmedTarget !== 'string') {
+        throw new Error('Project not created: the answer did not carry back the confirmed path');
+      }
+      const node = await scaffoldProject(registry, config.roots, group, name, {
+        readme,
+        gitignore,
+        root,
+        confirmedTarget
+      });
+      return json({ created: node.absolutePath, group: groupKey(node), name: node.name });
     })
   );
 }

@@ -85,3 +85,63 @@ describe('scaffoldProject', () => {
     await expect(stat(path.join(node.absolutePath, '.gitignore'))).rejects.toThrow();
   });
 });
+
+describe('scaffoldProject directly under a root', () => {
+  let first: string;
+  let second: string;
+  let twoRoots: Registry;
+
+  beforeAll(async () => {
+    first = await makeWorkspace({ Shared: {}, OnlyFirst: {} });
+    second = await makeWorkspace({ Shared: {} });
+    twoRoots = new Registry({ roots: [first, second], exclude: [], allowWrites: true });
+    await twoRoots.initialize();
+  });
+
+  afterAll(async () => {
+    await cleanup(first);
+    await cleanup(second);
+  });
+
+  it('creates the project at the root of the only configured root, with no group', async () => {
+    const node = await scaffoldProject(registry, [root], undefined, 'Top_Level');
+    expect(node.absolutePath).toBe(path.join(root, 'Top_Level'));
+    expect(node.groupPath).toBe('');
+    await expect(stat(path.join(root, 'Top_Level', '.git'))).resolves.toBeDefined();
+    expect(registry.resolve('Top_Level').absolutePath).toBe(path.join(root, 'Top_Level'));
+  });
+
+  it('asks which root when there is no group and several roots, listing them, and creates nothing', async () => {
+    const attempt = scaffoldProject(twoRoots, [first, second], undefined, 'Unplaced');
+    await expect(attempt).rejects.toThrow(/root/);
+    await expect(attempt).rejects.toThrow(first);
+    await expect(attempt).rejects.toThrow(second);
+    await expect(stat(path.join(first, 'Unplaced'))).rejects.toThrow(/ENOENT/);
+    await expect(stat(path.join(second, 'Unplaced'))).rejects.toThrow(/ENOENT/);
+  });
+
+  it('creates the project under the named root, written with a trailing slash too', async () => {
+    const node = await scaffoldProject(twoRoots, [first, second], undefined, 'In_Second', { root: `${second}/` });
+    expect(node.absolutePath).toBe(path.join(second, 'In_Second'));
+  });
+
+  it('refuses a root that is not configured, and creates nothing there', async () => {
+    const outside = await makeWorkspace({});
+    try {
+      await expect(scaffoldProject(twoRoots, [first, second], undefined, 'X', { root: outside })).rejects.toThrow(
+        /not a configured root/
+      );
+      await expect(stat(path.join(outside, 'X'))).rejects.toThrow(/ENOENT/);
+    } finally {
+      await cleanup(outside);
+    }
+  });
+
+  it('looks the group up only under the named root', async () => {
+    const node = await scaffoldProject(twoRoots, [first, second], 'Shared', 'Second_Shared', { root: second });
+    expect(node.absolutePath).toBe(path.join(second, 'Shared', 'Second_Shared'));
+    await expect(
+      scaffoldProject(twoRoots, [first, second], 'OnlyFirst', 'Y', { root: second })
+    ).rejects.toThrow(/does not exist/);
+  });
+});

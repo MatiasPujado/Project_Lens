@@ -110,6 +110,7 @@ Security-relevant behaviour has dedicated coverage, and it needs to stay that wa
 | Writes never go through a symbolic link in the last path component (refused, then `O_NOFOLLOW`); no `O_NOFOLLOW` means no writes                                                       | `test/tools.test.ts`, `test/security.test.ts`                        |
 | A repository's own config runs nothing: `core.fsmonitor` off, its own filter commands blanked, submodules ignored, ripgrep `--no-config`                                               | `test/git.test.ts`, `test/search.test.ts`                            |
 | Remote URL sanitising (`user:token@` stripped)                                                                                                                                         | `test/git.test.ts`                                                   |
+| Scaffold confirmation: no project is created without the user's explicit yes, and `root` must resolve to a configured root                                                             | `test/scaffold-tool.test.ts`, `test/scaffold.test.ts`                |
 | Write gate: write tools unregistered unless enabled                                                                                                                                    | `test/integration.test.ts`, `test/config.test.ts`                    |
 
 Write-tool tests deliberately assert on **registration**, not just on refusal. "The tool rejected the call" and "the

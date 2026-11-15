@@ -88,7 +88,7 @@ directories piggybacked onto registry calls. No filesystem watcher, no disk cach
 | `list_files(project, glob?, path_prefix?, offset?)`                                                                         | Paths relative to the project root; respects `.gitignore`, skips hidden files; 500 per page, `next_offset` for the next page                                 |
 | `read_file(project, relative_path, offset?, limit?)`                                                                        | Scoped read; a line slice is streamed and ends with `[lines a-b of N]`                                                                                       |
 | `write_file(project, relative_path, content)`                                                                               | **Off by default.** Scoped write; creates parent dirs inside the root                                                                                        |
-| `scaffold_project(group, name, {readme?, gitignore?})`                                                                      | **Off by default. User-initiated only.** Create `<group>/<name>` + `git init`. No network access                                                             |
+| `scaffold_project(name, group?, root?, {readme?, gitignore?})`                                                              | **Off by default. Asks the user to confirm.** Create `<group>/<name>`, or `<name>` straight under `root`, + `git init`. No network access                    |
 | `refresh_registry`                                                                                                          | Force a full re-scan, returns scan stats                                                                                                                     |
 
 **Narrowing a search.** `search` only scans the directories of the projects in scope, never the whole root, and takes
@@ -152,6 +152,9 @@ _what_ it reads, and it runs with your user's permissions.
 - **Enabling writes widens what injected text can do.** With `allow_writes` on, an agent can write any non-secret file
   outside `.git`: source code, build scripts, CI files. Those run later, through your own tools, outside this server's
   control. Turn writes on only for workspaces whose contents you trust, and review what the agent writes.
+- **The scaffold confirmation trusts the client.** The question reaches you through the MCP client, which also sends
+  your answer back. A client that answers by itself, without showing the form, gets the project created. The
+  confirmation guards against the agent acting alone, not against a dishonest client.
 - **It is not a sandbox.** The server does not isolate the agent from the rest of your machine; it only refuses paths
   outside the projects it registered. Other tools the agent has are not affected.
 - **A workspace another OS user can write to is out of scope.** Between checking a path and opening it, a folder in the
@@ -258,6 +261,9 @@ parameters (a one-time cost against a tool whose single unnarrowed call runs int
 for themselves the first time the model uses one). Every parameter of every tool carries a description, which is most of
 the difference between the nine-tool figure and a bare-schema server. It is worth the tokens: one `read_file` that
 guesses the project key wrong costs a rejected call plus a `find_project` round trip to recover.
+
+The schema figures predate the tool annotations and the `scaffold_project` `root` argument, which together take the
+eleven schemas from 8594 to 9613 bytes (counted with the in-memory client); they were not re-measured in tokens.
 
 One asymmetry is not corrected for: **MCP is charged for its tool schemas and the shell is not.** A model calling out to
 a shell pays for the Bash tool's schema too, and that cost never appears in the shell column. Every ratio here is
@@ -524,6 +530,17 @@ export PROJECT_LENS_ALLOW_WRITES=1     # or 'true' / 'yes' / 'on'
 ```
 
 The environment variable wins over the config file. Everything else the server exposes is read-only.
+
+`scaffold_project` asks the user before it creates anything. It checks the name, the group and the target first, then
+sends a form naming the exact path through MCP elicitation, and creates the project only on an explicit yes. A client
+that cannot show the form, a decline, a cancel or a "no" creates nothing. Without `group`, the project goes straight
+under a root (reported as group `(root)`); `root` names which one, and must resolve to a configured root as
+`map_workspace` lists it: it is compared after path resolution, so a trailing slash is ignored and a relative path
+resolves against the server's working directory.
+
+Every tool declares MCP tool annotations: the read-only tools `readOnlyHint: true`, `write_file` `destructiveHint: true`
+(it overwrites), `scaffold_project` `readOnlyHint: false` and `destructiveHint: false` (it never replaces anything), and
+all of them `openWorldHint: false`.
 
 </details>
 
