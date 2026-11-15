@@ -544,6 +544,49 @@ all of them `openWorldHint: false`.
 
 </details>
 
+### Upgrading from 0.3
+
+Version 0.4.0 changes behaviour a client or an operator may rely on:
+
+- **`project_info` takes `project`**, like every other per-project tool. A call that still passes `name` is refused as
+  invalid arguments.
+- **The configuration file moved.** The server reads `$PROJECT_LENS_CONFIG`, else
+  `$XDG_CONFIG_HOME/project-lens/config.json`, else `~/.config/project-lens/config.json`. `PROJECTS_MCP_CONFIG`,
+  `$XDG_CONFIG_HOME/projects-mcp/config.json` and `~/.config/projects-mcp/config.json` are no longer read, with no
+  fallback: move the file or rename the variable.
+- **Every root in use is checked at startup.** When the roots come from the configuration file, one that does not exist
+  or is not a directory now fails startup; 0.3 checked only a command-line or `PROJECT_LENS_PATH` root.
+- **ripgrep ignores your ripgrep configuration.** `search` and `list_files` start it with `--no-config`, so a file named
+  by `RIPGREP_CONFIG_PATH` no longer changes what they find.
+- **A project held by two roots is no longer resolved silently.** When two roots hold the same `group/name`, a call
+  naming it fails as ambiguous and lists both absolute paths; pass one of them instead. 0.3 kept only one copy.
+- **`scaffold_project` asks the user first.** It needs a client that supports MCP form elicitation; without one, or
+  without an explicit yes, nothing is created.
+- **`list_projects` rejects an unknown group** with `Unknown group: "<group>"` instead of returning no rows.
+- **Group filters ignore letter case** in `list_projects` and `search`. When a group matches as written, only that one
+  counts, so `AI` and `ai` stay apart on a case-sensitive disk.
+- **More paths are refused.** `read_file`, `write_file`, `search` and `list_files` refuse any path with a `.git`
+  segment, in any letter case, and every secret-pattern file. In 0.3 `write_file` did not check secret files at all, and
+  the other three knew only `.env*`, `*.pem`, `id_rsa*` and `*credentials*`. The list now adds `.npmrc`, `.netrc`,
+  `.pgpass`, `.htpasswd`, `id_ed25519*`, `id_ecdsa*`, `id_dsa*`, and the key and certificate stores `*.key`, `*.p12`,
+  `*.pfx`, `*.jks`, `*.keystore` and `*.kdbx`. A refused `relative_path` or `path_prefix` is reported as
+  `Access forbidden (.git or secret-pattern file): <path>`; a refused search hit or listed file is left out.
+- **`write_file` never writes through a symbolic link** in the last path component, even one that points inside the
+  project; 0.3 followed it.
+- **`read_file` marks partial reads.** A read with `offset` or `limit` ends with `[lines a-b of N]`; an `offset` past
+  the end returns `[offset a is past the last line, N]`; a read that hits the size cap ends with
+  `[truncated at C chars in line L of N]`. `a` and `b` are the first and last line returned, `N` the file's line count,
+  `C` the cap, 500000 characters, and `L` the line the read stopped in.
+- **`search` caps each excerpt line at 300 characters.** 0.3 capped the joined excerpt instead, so one long line could
+  push the lines after it out.
+- **`write_file` refuses every write on a platform without `O_NOFOLLOW`** (Windows).
+- **`is_clean` ignores changes inside submodules**: it reports the repository's own files only.
+- **`is_clean` runs no filter the repository's own config defines.** `git status` runs with the clean, smudge and
+  process commands of the repository's own `filter.*` entries blanked, so a repository that relies on such a filter can
+  report a different `is_clean`. Filters from your global or system config still run. `core.fsmonitor` is turned off
+  too. When git cannot list the repository's config, `is_clean` is `null`, because running `git status` could run a
+  filter.
+
 ---
 
 ## For developers and contributors
