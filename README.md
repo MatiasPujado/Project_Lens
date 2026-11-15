@@ -336,7 +336,7 @@ The server exits loudly if any of these is missing; it never starts with a silen
 **From a release asset** (fastest, no build toolchain, no registry account):
 
 ```bash
-npm install -g https://github.com/MatiasPujado/Project_Lens/releases/download/v0.3.0/mpujado-project-lens-0.3.0.tgz
+npm install -g https://github.com/MatiasPujado/Project_Lens/releases/download/v0.4.0/mpujado-project-lens-0.4.0.tgz
 ```
 
 npm installs a tarball straight from a URL, so this needs no authentication and no registry configuration for the
