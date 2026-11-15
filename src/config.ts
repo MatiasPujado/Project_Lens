@@ -29,9 +29,9 @@ export function expandHome(p: string): string {
 }
 
 export function configPath(env: NodeJS.ProcessEnv = process.env): string {
-  if (env.PROJECTS_MCP_CONFIG) return expandHome(env.PROJECTS_MCP_CONFIG);
+  if (env.PROJECT_LENS_CONFIG) return expandHome(env.PROJECT_LENS_CONFIG);
   const xdg = env.XDG_CONFIG_HOME ? expandHome(env.XDG_CONFIG_HOME) : path.join(homedir(), '.config');
-  return path.join(xdg, 'projects-mcp', 'config.json');
+  return path.join(xdg, 'project-lens', 'config.json');
 }
 
 export function loadConfig(file: string = configPath()): LensConfig | undefined {
@@ -96,19 +96,19 @@ function assertRootDirectory(root: string, source: string): void {
   }
 }
 
-export function overrideRoot(config: LensConfig, root: string): LensConfig {
+export function overrideRoot(config: LensConfig, root: string, source: string): LensConfig {
   const resolved = path.resolve(expandHome(root));
-  assertRootDirectory(resolved, 'PROJECT_LENS_PATH');
+  assertRootDirectory(resolved, source);
   return { ...config, roots: [resolved] };
 }
 
 export function resolveConfig(rootArg?: string, env: NodeJS.ProcessEnv = process.env): LensConfig {
   const file = configPath(env);
   const fromFile = loadConfig(file);
-  const root = rootArg || env.PROJECT_LENS_PATH;
   const empty: LensConfig = { roots: [], exclude: [], allowWrites: false };
   let config: LensConfig;
-  if (root) config = overrideRoot(fromFile ?? empty, root);
+  if (rootArg) config = overrideRoot(fromFile ?? empty, rootArg, 'Command-line argument');
+  else if (env.PROJECT_LENS_PATH) config = overrideRoot(fromFile ?? empty, env.PROJECT_LENS_PATH, 'PROJECT_LENS_PATH');
   else if (fromFile && fromFile.roots.length > 0) {
     for (const r of fromFile.roots) assertRootDirectory(r, `Config file ${file}:`);
     config = fromFile;

@@ -83,7 +83,7 @@ directories piggybacked onto registry calls. No filesystem watcher, no disk cach
 | `list_groups`                                                                                                               | Flat list of group paths                                                                                                                                     |
 | `list_projects(group?, include?)`                                                                                           | Projects as `{fields, rows}`, optionally filtered by group (case-insensitive); `include: ["branch", "is_clean", "stack"]` adds live metadata for bulk sweeps |
 | `find_project(query)`                                                                                                       | Name match (case-insensitive; also ignoring spaces, `_`, `-`, `.`; names as written rank first) → group + absolute path; capped at 10 with `truncated`       |
-| `project_info(name)`                                                                                                        | Path, VCS remote/branch/clean state, detected stack, key manifests, README snippet                                                                           |
+| `project_info(project)`                                                                                                     | Path, VCS remote/branch/clean state, detected stack, key manifests, README snippet                                                                           |
 | `search(query, project\|group\|scope, path_prefix?, glob?, exclude?, context_lines?, limit?, fixed_strings?, ignore_case?)` | ripgrep content search over one project, one group, or every registered project; results grouped one entry per file                                          |
 | `list_files(project, glob?, path_prefix?, offset?)`                                                                         | Paths relative to the project root; respects `.gitignore`, skips hidden files; 500 per page, `next_offset` for the next page                                 |
 | `read_file(project, relative_path, offset?, limit?)`                                                                        | Scoped read; a line slice is streamed and ends with `[lines a-b of N]`                                                                                       |
@@ -471,8 +471,8 @@ Two things that commonly trip people up:
 <details>
 <summary><b>Optional configuration file</b>: exclusions, multiple roots, enabling writes</summary>
 
-Only needed for exclusion globs, multiple roots, or enabling writes. Location: `$PROJECTS_MCP_CONFIG` if set, else
-`$XDG_CONFIG_HOME/projects-mcp/config.json`, else `~/.config/projects-mcp/config.json`. A missing file is fine; a
+Only needed for exclusion globs, multiple roots, or enabling writes. Location: `$PROJECT_LENS_CONFIG` if set, else
+`$XDG_CONFIG_HOME/project-lens/config.json`, else `~/.config/project-lens/config.json`. A missing file is fine; a
 malformed one fails startup, and so does a root it lists that does not exist or is not a directory.
 
 ```json
@@ -556,7 +556,7 @@ benchmark/   e2e latency, registry micro-benchmarks, token-cost harness
 
 ```bash
 npm run build          # tsc
-npm test               # vitest: unit + integration
+npm test               # type-check src, test and benchmark, then vitest: unit + integration
 npm run lint           # eslint with typescript-eslint type-checked rules, tests included
 npm run test:watch     # watch mode
 npm run test:coverage  # coverage report

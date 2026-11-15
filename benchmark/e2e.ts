@@ -17,7 +17,7 @@ const cases: Case[] = [
   { label: 'list_groups', tool: 'list_groups', args: {} },
   { label: 'list_projects', tool: 'list_projects', args: {} },
   { label: 'find_project', tool: 'find_project', args: { query: project.slice(0, 4) } },
-  { label: 'project_info', tool: 'project_info', args: { name: project } },
+  { label: 'project_info', tool: 'project_info', args: { project } },
   { label: 'search (project)', tool: 'search', args: { query: 'TODO', project } },
   // The widest scope is the one the narrowing parameters exist to avoid; measure what it costs.
   { label: 'search (scope all)', tool: 'search', args: { query: 'TODO', scope: 'all' } },

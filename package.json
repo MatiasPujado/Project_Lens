@@ -24,7 +24,7 @@
     "build": "tsc",
     "start": "npm run build && node dist/src/index.js",
     "prepublishOnly": "npm run build && npm test",
-    "test": "vitest run",
+    "test": "tsc -p tsconfig.lint.json && vitest run",
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
     "bench": "npm run build && node dist/benchmark/e2e.js",

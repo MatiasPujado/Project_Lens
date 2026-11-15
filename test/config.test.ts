@@ -73,13 +73,19 @@ describe('loadConfig', () => {
 });
 
 describe('configPath', () => {
-  it('prefers PROJECTS_MCP_CONFIG', () => {
-    expect(configPath({ PROJECTS_MCP_CONFIG: '/etc/lens.json' })).toBe('/etc/lens.json');
+  it('prefers PROJECT_LENS_CONFIG', () => {
+    expect(configPath({ PROJECT_LENS_CONFIG: '/etc/lens.json' })).toBe('/etc/lens.json');
+  });
+
+  it('ignores the old PROJECTS_MCP_CONFIG name, with no fallback', () => {
+    expect(configPath({ PROJECTS_MCP_CONFIG: '/etc/lens.json', XDG_CONFIG_HOME: '/xdg' })).toBe(
+      '/xdg/project-lens/config.json'
+    );
   });
 
   it('falls back to XDG_CONFIG_HOME then ~/.config', () => {
-    expect(configPath({ XDG_CONFIG_HOME: '/xdg' })).toBe('/xdg/projects-mcp/config.json');
-    expect(configPath({})).toBe(path.join(homedir(), '.config', 'projects-mcp', 'config.json'));
+    expect(configPath({ XDG_CONFIG_HOME: '/xdg' })).toBe('/xdg/project-lens/config.json');
+    expect(configPath({})).toBe(path.join(homedir(), '.config', 'project-lens', 'config.json'));
   });
 });
 
@@ -88,16 +94,20 @@ describe('overrideRoot', () => {
 
   it('replaces roots with the resolved directory, keeps exclude', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'lens-root-'));
-    expect(overrideRoot(base, dir)).toEqual({ roots: [dir], exclude: ['**/skip/**'], allowWrites: false });
+    expect(overrideRoot(base, dir, 'PROJECT_LENS_PATH')).toEqual({
+      roots: [dir],
+      exclude: ['**/skip/**'],
+      allowWrites: false
+    });
   });
 
   it('fails loudly on nonexistent path', () => {
-    expect(() => overrideRoot(base, '/nonexistent/root')).toThrow(/does not exist/);
+    expect(() => overrideRoot(base, '/nonexistent/root', 'PROJECT_LENS_PATH')).toThrow(/does not exist/);
   });
 
   it('fails loudly when path is not a directory', async () => {
     const file = await writeConfig('{}');
-    expect(() => overrideRoot(base, file)).toThrow(/not a directory/);
+    expect(() => overrideRoot(base, file, 'PROJECT_LENS_PATH')).toThrow(/not a directory/);
   });
 });
 
@@ -105,7 +115,7 @@ describe('resolveConfig', () => {
   it('uses PROJECT_LENS_PATH when no config file exists', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'lens-env-'));
     const config = resolveConfig(undefined, {
-      PROJECTS_MCP_CONFIG: '/nonexistent/config.json',
+      PROJECT_LENS_CONFIG: '/nonexistent/config.json',
       PROJECT_LENS_PATH: dir
     });
     expect(config).toEqual({ roots: [dir], exclude: [], allowWrites: false });
@@ -115,7 +125,7 @@ describe('resolveConfig', () => {
     const argDir = await mkdtemp(path.join(tmpdir(), 'lens-arg-'));
     const envDir = await mkdtemp(path.join(tmpdir(), 'lens-env-'));
     const config = resolveConfig(argDir, {
-      PROJECTS_MCP_CONFIG: '/nonexistent/config.json',
+      PROJECT_LENS_CONFIG: '/nonexistent/config.json',
       PROJECT_LENS_PATH: envDir
     });
     expect(config.roots).toEqual([argDir]);
@@ -124,23 +134,23 @@ describe('resolveConfig', () => {
   it('overrides the config roots but keeps its exclude', async () => {
     const file = await writeConfig(JSON.stringify({ roots: ['/orig'], exclude: ['**/skip/**'] }));
     const dir = await mkdtemp(path.join(tmpdir(), 'lens-env-'));
-    const config = resolveConfig(undefined, { PROJECTS_MCP_CONFIG: file, PROJECT_LENS_PATH: dir });
+    const config = resolveConfig(undefined, { PROJECT_LENS_CONFIG: file, PROJECT_LENS_PATH: dir });
     expect(config).toEqual({ roots: [dir], exclude: ['**/skip/**'], allowWrites: false });
   });
 
   it('falls back to the config file when no root is given', async () => {
     const real = await mkdtemp(path.join(tmpdir(), 'lens-root-'));
     const file = await writeConfig(JSON.stringify({ roots: [real] }));
-    expect(resolveConfig(undefined, { PROJECTS_MCP_CONFIG: file }).roots).toEqual([real]);
+    expect(resolveConfig(undefined, { PROJECT_LENS_CONFIG: file }).roots).toEqual([real]);
   });
 
   it('keeps writes off unless the config file or the env var turns them on', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'lens-writes-'));
-    const env = { PROJECTS_MCP_CONFIG: '/nonexistent/config.json', PROJECT_LENS_PATH: dir };
+    const env = { PROJECT_LENS_CONFIG: '/nonexistent/config.json', PROJECT_LENS_PATH: dir };
     expect(resolveConfig(undefined, env).allowWrites).toBe(false);
 
     const enabled = await writeConfig(JSON.stringify({ roots: [dir], allow_writes: true }));
-    expect(resolveConfig(undefined, { PROJECTS_MCP_CONFIG: enabled }).allowWrites).toBe(true);
+    expect(resolveConfig(undefined, { PROJECT_LENS_CONFIG: enabled }).allowWrites).toBe(true);
 
     for (const value of ['1', 'true', 'YES', 'on']) {
       expect(resolveConfig(undefined, { ...env, PROJECT_LENS_ALLOW_WRITES: value }).allowWrites).toBe(true);
@@ -149,25 +159,38 @@ describe('resolveConfig', () => {
       expect(resolveConfig(undefined, { ...env, PROJECT_LENS_ALLOW_WRITES: value }).allowWrites).toBe(false);
     }
     expect(
-      resolveConfig(undefined, { PROJECTS_MCP_CONFIG: enabled, PROJECT_LENS_ALLOW_WRITES: '0' }).allowWrites
+      resolveConfig(undefined, { PROJECT_LENS_CONFIG: enabled, PROJECT_LENS_ALLOW_WRITES: '0' }).allowWrites
     ).toBe(false);
   });
 
+  it('names the command-line argument when it is the bad root', async () => {
+    const env = {
+      PROJECT_LENS_CONFIG: '/nonexistent/config.json',
+      PROJECT_LENS_PATH: await mkdtemp(path.join(tmpdir(), 'lens-env-'))
+    };
+    expect(() => resolveConfig('/nonexistent/root', env)).toThrow(/^Command-line argument root does not exist/);
+  });
+
+  it('names PROJECT_LENS_PATH when it is the bad root', () => {
+    const env = { PROJECT_LENS_CONFIG: '/nonexistent/config.json', PROJECT_LENS_PATH: '/nonexistent/root' };
+    expect(() => resolveConfig(undefined, env)).toThrow(/^PROJECT_LENS_PATH root does not exist/);
+  });
+
   it('fails loudly when no root and no config file', () => {
-    expect(() => resolveConfig(undefined, { PROJECTS_MCP_CONFIG: '/nonexistent/config.json' })).toThrow(
+    expect(() => resolveConfig(undefined, { PROJECT_LENS_CONFIG: '/nonexistent/config.json' })).toThrow(
       /PROJECT_LENS_PATH/
     );
   });
 
   it('fails loudly when the config file supplies no root either', async () => {
     const file = await writeConfig(JSON.stringify({ exclude: ['x'] }));
-    expect(() => resolveConfig(undefined, { PROJECTS_MCP_CONFIG: file })).toThrow(/PROJECT_LENS_PATH/);
+    expect(() => resolveConfig(undefined, { PROJECT_LENS_CONFIG: file })).toThrow(/PROJECT_LENS_PATH/);
   });
 
   it('fails startup when a config-file root does not exist, naming the file', async () => {
     const real = await mkdtemp(path.join(tmpdir(), 'lens-root-'));
     const file = await writeConfig(JSON.stringify({ roots: [real, '/nonexistent/root'] }));
-    const error = thrown(() => resolveConfig(undefined, { PROJECTS_MCP_CONFIG: file }));
+    const error = thrown(() => resolveConfig(undefined, { PROJECT_LENS_CONFIG: file }));
     expect(error.message).toMatch(/root does not exist: \/nonexistent\/root/);
     expect(error.message).toContain(file);
   });
@@ -175,13 +198,13 @@ describe('resolveConfig', () => {
   it('fails startup when a config-file root is not a directory', async () => {
     const notDir = await writeConfig('{}');
     const file = await writeConfig(JSON.stringify({ roots: [notDir] }));
-    expect(() => resolveConfig(undefined, { PROJECTS_MCP_CONFIG: file })).toThrow(/root is not a directory/);
+    expect(() => resolveConfig(undefined, { PROJECT_LENS_CONFIG: file })).toThrow(/root is not a directory/);
   });
 
   it('does not check config-file roots that a command-line root replaces', async () => {
     const real = await mkdtemp(path.join(tmpdir(), 'lens-root-'));
     const file = await writeConfig(JSON.stringify({ roots: ['/nonexistent/root'] }));
-    expect(resolveConfig(real, { PROJECTS_MCP_CONFIG: file }).roots).toEqual([real]);
+    expect(resolveConfig(real, { PROJECT_LENS_CONFIG: file }).roots).toEqual([real]);
   });
 });
 
@@ -198,7 +221,7 @@ describe('per-root .project-lens.json', () => {
     const withConfig = await makeRoot({ exclude: ['Archived/**'] });
     const plain = await makeRoot();
     const file = await writeConfig(JSON.stringify({ roots: [withConfig, plain], exclude: ['global/**'] }));
-    const config = resolveConfig(undefined, { PROJECTS_MCP_CONFIG: file });
+    const config = resolveConfig(undefined, { PROJECT_LENS_CONFIG: file });
     expect(excludeFor(config, withConfig)).toEqual(['global/**', 'Archived/**']);
     expect(excludeFor(config, plain)).toEqual(['global/**']);
   });
