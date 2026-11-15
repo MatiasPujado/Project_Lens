@@ -21,7 +21,6 @@ target/
 .vscode/
 bin/
 tmp/
-target/
 build/
 `;
 

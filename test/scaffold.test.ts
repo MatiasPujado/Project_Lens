@@ -78,6 +78,12 @@ describe('scaffoldProject', () => {
     await expect(stat(path.join(node.absolutePath, 'README.md'))).rejects.toThrow();
   });
 
+  it('lists each entry of the gitignore stub once', async () => {
+    const node = await scaffoldProject(registry, [root], 'Experiments', 'Unique_Ignores', { gitignore: true });
+    const entries = (await readFile(path.join(node.absolutePath, '.gitignore'), 'utf8')).split('\n').filter(Boolean);
+    expect(entries).toEqual([...new Set(entries)]);
+  });
+
   it('writes no stubs by default', async () => {
     const node = await scaffoldProject(registry, [root], 'Experiments', 'Bare');
     await expect(stat(path.join(node.absolutePath, '.git'))).resolves.toBeDefined();

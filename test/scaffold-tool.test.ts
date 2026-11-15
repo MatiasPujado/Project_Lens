@@ -107,11 +107,13 @@ describe('scaffold_project asks the user to confirm', () => {
   it('creates nothing when a confirmed answer comes back without the confirmed path', async () => {
     const client = await connect();
     try {
-      const result = await client.callTool({
+      // inputResponses is not in callTool's typed params: the SDK lifts it from any tools/call, which is the point.
+      const params = {
         name: 'scaffold_project',
         arguments: { group: 'Group', name: 'NoState' },
         inputResponses: { confirm: { action: 'accept', content: { confirm: true } } }
-      });
+      };
+      const result = await client.callTool(params);
       expect(isError(result)).toBe(true);
       expect(textOf(result)).toMatch(/not created: the answer did not carry back the confirmed path/i);
       await absent('NoState');

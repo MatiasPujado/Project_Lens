@@ -382,10 +382,23 @@ describe('search', () => {
 });
 
 describe('project_info', () => {
+  it('takes the project as `project`, like the other tools', async () => {
+    const info = jsonOf<{ name: string }>(
+      await client.callTool({ name: 'project_info', arguments: { project: 'Solo' } })
+    );
+    expect(info.name).toBe('Solo');
+  });
+
+  it('refuses the old `name` argument rather than falling back to it', async () => {
+    const result = await client.callTool({ name: 'project_info', arguments: { name: 'Solo' } });
+    expect(isError(result)).toBe(true);
+    expect(textOf(result)).toMatch(/Invalid arguments for tool project_info: project: Invalid input/);
+  });
+
   it.skipIf(!notRoot)('returns a null snippet when the README is unreadable', async () => {
     await chmod(path.join(root, 'Group', 'ProjA', 'README.md'), 0o000);
     const info = jsonOf<{ readme_snippet: string | null }>(
-      await client.callTool({ name: 'project_info', arguments: { name: 'ProjA' } })
+      await client.callTool({ name: 'project_info', arguments: { project: 'ProjA' } })
     );
     expect(info.readme_snippet).toBeNull();
     await chmod(path.join(root, 'Group', 'ProjA', 'README.md'), 0o644);
@@ -393,21 +406,21 @@ describe('project_info', () => {
 
   it('returns a null snippet for a project without a README', async () => {
     const info = jsonOf<{ readme_snippet: string | null; group: string }>(
-      await client.callTool({ name: 'project_info', arguments: { name: 'Solo' } })
+      await client.callTool({ name: 'project_info', arguments: { project: 'Solo' } })
     );
     expect(info.readme_snippet).toBeNull();
     expect(info.group).toBe('(root)');
   });
 
   it('surfaces registry resolution failures as tool errors', async () => {
-    const result = await client.callTool({ name: 'project_info', arguments: { name: 'Nope' } });
+    const result = await client.callTool({ name: 'project_info', arguments: { project: 'Nope' } });
     expect(isError(result)).toBe(true);
     expect(textOf(result)).toMatch(/Project not found/);
   });
 
   it('reports svn projects without invoking svn and carries no scanned_at', async () => {
     const info = jsonOf<Record<string, unknown>>(
-      await client.callTool({ name: 'project_info', arguments: { name: 'SvnProj' } })
+      await client.callTool({ name: 'project_info', arguments: { project: 'SvnProj' } })
     );
     expect(info['vcs']).toEqual({ type: 'svn', remote: null, branch: null, is_clean: null });
     expect(info).not.toHaveProperty('scanned_at');
@@ -714,7 +727,7 @@ describe('file tools on a project created after startup', () => {
     await writeFile(path.join(early, 'package.json'), '{}\n');
     await writeFile(path.join(early, 'README.md'), '# Early\n');
     const info = jsonOf<{ detected_stack: string[]; key_files: string[]; readme_snippet: string | null }>(
-      await lateClient.callTool({ name: 'project_info', arguments: { name: 'Early' } })
+      await lateClient.callTool({ name: 'project_info', arguments: { project: 'Early' } })
     );
     expect(info.detected_stack).toEqual(['Node.js']);
     expect(info.key_files).toEqual(['package.json']);

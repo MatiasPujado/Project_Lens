@@ -48,6 +48,7 @@ src/
   stack.ts        manifest-based stack detection
   tools.ts        MCP tool definitions, schemas and handlers
   types.ts        shared types
+  version.ts      the server version, read from package.json
 
 test/             one suite per src module, plus integration.test.ts
 benchmark/        e2e latency, registry micro-benchmarks, token-cost harness
@@ -59,7 +60,7 @@ One package, one build. There are no workspaces or sub-packages to juggle.
 
 ```bash
 npm run build          # tsc
-npm test               # vitest: unit + integration
+npm test               # type-check src, test and benchmark, then vitest: unit + integration
 npm run lint           # eslint with typescript-eslint type-checked rules, tests included
 npm run test:watch     # watch mode
 npm run test:coverage  # coverage report

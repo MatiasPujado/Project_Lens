@@ -16,6 +16,7 @@ import { scaffoldProject, scaffoldTarget } from './scaffold.js';
 import { listFiles, MAX_FILES, searchScope } from './search.js';
 import { noFollowWriteFlags, resolveWithin } from './security.js';
 import type { LensConfig, ProjectNode } from './types.js';
+import { packageVersion } from './version.js';
 
 const MAX_READ_CHARS = 500_000;
 const README_SNIPPET_LINES = 10;
@@ -205,7 +206,7 @@ async function scopeDirsFor(scoped: ProjectNode[], pathPrefix?: string): Promise
 }
 
 export function buildServer(registry: Registry, config: LensConfig): McpServer {
-  const server = new McpServer({ name: 'project-lens', version: '0.4.0' });
+  const server = new McpServer({ name: 'project-lens', version: packageVersion() });
 
   server.registerTool(
     'map_workspace',
@@ -330,11 +331,11 @@ export function buildServer(registry: Registry, config: LensConfig): McpServer {
       description:
         'Full metadata for one project: path, vcs state (queried live on every call), detected stack, ' +
         'key files, README snippet.',
-      inputSchema: z.object({ name: projectKeyArg })
+      inputSchema: z.object({ project: projectKeyArg })
     },
-    guarded(async ({ name }) => {
+    guarded(async ({ project }) => {
       await registry.revalidate();
-      const node = registry.resolve(name);
+      const node = registry.resolve(project);
       const files = await filesOf(node);
       const [vcs, snippet] = await Promise.all([
         vcsInfo(node.vcsType, node.absolutePath),

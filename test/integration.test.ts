@@ -118,7 +118,7 @@ describe('Project-Lens over MCP', () => {
 
   it('project_info returns lazy metadata', async () => {
     const info = jsonOf<{ detected_stack: string[]; readme_snippet: string; vcs: { type: string } }>(
-      await client.callTool({ name: 'project_info', arguments: { name: 'Homebanking' } })
+      await client.callTool({ name: 'project_info', arguments: { project: 'Homebanking' } })
     );
     expect(info.detected_stack).toEqual(['Java']);
     expect(info.readme_snippet).toContain('# Homebanking');
